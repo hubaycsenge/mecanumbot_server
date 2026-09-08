@@ -21,6 +21,14 @@ def generate_launch_description():
             "client_path", default_value="~/robocam_client.py",
             description="Deployed robocam_client.py, or the directory holding it.",
         ),
+        DeclareLaunchArgument(
+            "enable_map_loop", default_value="true",
+            description=(
+                "Send the pose, grid and scan up, and republish the server's "
+                "verdict and target. false leaves this node a frame pump, for "
+                "benchmarking the transport against a server with compare off."
+            ),
+        ),
         Node(
             namespace="mecanumbot",
             package="mecanumbot_deep3r",
@@ -34,6 +42,7 @@ def generate_launch_description():
                 config,
                 {"server": LaunchConfiguration("server")},
                 {"client_path": LaunchConfiguration("client_path")},
+                {"enable_map_loop": LaunchConfiguration("enable_map_loop")},
             ],
         ),
     ])

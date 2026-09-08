@@ -7,6 +7,8 @@ mecanumbot_deep3r_client_node:
 
     # The standalone client file, deployed from RoboCamStreamProcessing/link.
     # A directory is accepted too; robocam_client.py is looked for inside it.
+    # This is the value that wins: the node's declared default differs, and a
+    # parameter file always overrides it.
     client_path: ~/robocam_client.py
 
     # mecanumbot_camera_stream already owns the camera device, so frames come
@@ -37,3 +39,53 @@ mecanumbot_deep3r_client_node:
 
     # Log one line every N published clouds; 0 disables.
     log_every: 30
+
+    # --- the map loop (protocol 2) ---------------------------------------
+    # With this off the node is a frame pump: it streams images and republishes
+    # clouds, and the server's comparison has nothing to compare against. That
+    # was the whole robot side of protocol 2 until 2026-09-08. See
+    # RoboCamStreamProcessing/docs/INTEGRATION.md.
+    enable_map_loop: true
+
+    map_topic: /map
+    scan_topic: /scan
+
+    # The pose is read from TF, not from a topic, and this is not a preference:
+    # the server refuses to compare a pose against a grid drawn in a different
+    # frame, and T1 runs under slam_toolbox, which publishes no /amcl_pose. The
+    # map -> base_link transform is the only map-frame pose available during
+    # exploration, and it works unchanged under AMCL in T2.
+    map_frame: map
+    base_frame: mecanumbot/base_link
+    pose_rate_hz: 10.0
+
+    # The grid is large and not perishable; one upload every few seconds is
+    # plenty, and uploading it per frame would spend more of the uplink on a
+    # room that is not changing than on the images of it that are.
+    map_every_s: 5.0
+
+    # What this node publishes from what comes back. The first is what the
+    # frontier explorer's T1 CLOUD exit criterion and the keepout mask are both
+    # built from; without it T1 can never finish.
+    agreement_topic: /mecanumbot/deep3r/map_agreement
+    # The seek tree's two inputs, and they are two on purpose: `memory` (where
+    # the object was) drives the goto branch, `live` (where it is now) drives
+    # the monitor branch. Merging them would collapse the distinction the whole
+    # two-branch search is built on.
+    seek_target_topic: /mecanumbot/seek/target
+    seek_detections_topic: /mecanumbot/seek/detections
+
+    # T1 -> T2. The explorer latches `finished` when its exit criteria are met;
+    # this node is what tells the server, which never changes phase on its own.
+    finished_topic: /mecanumbot/exploration/finished
+    # The target is free text, not a class label: it is the query an
+    # open-vocabulary detector is given, and "the red mug on the desk" finds
+    # what "mug" does not.
+    request_topic: /mecanumbot/seek/request
+
+    # A pose_hint is advisory and nothing here applies one -- slam_toolbox owns
+    # the robot's pose and has a graph the server cannot see. These only gate
+    # whether a hint is worth a log line: a correction offered from a handful of
+    # inliers is the reconstruction agreeing with one corner of the room.
+    hint_min_confidence: 0.5
+    hint_min_inliers: 40

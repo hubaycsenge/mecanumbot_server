@@ -95,22 +95,46 @@ restarts with them, so anything accumulated against the previous one is void.
 
 ## Running
 
-The tunnel has to be up first — see `RoboCamStreamProcessing/link/README.md`.
+This node is one step of a longer sequence. **The full T1 startup — the cluster
+job, the tunnel, the robot, and what to watch — is in
+`mecanumbot_custom_nav2/README.md` under "Starting T1".** It is written there
+because that package owns the phase; what follows is only this node's own part.
+
+One-time setup on the robot:
 
 ```bash
-# once, on the robot
 scp -P 10113 csengehubay@nipg36.inf.elte.hu:~/mecanumbot_repos/RoboCamStreamProcessing/link/robocam_client.py ~/
 pip3 install pyzmq
-
-ros2 launch mecanumbot_deep3r deep3r.launch.py
-ros2 topic hz /mecanumbot/deep3r/points
 ```
 
-Expect roughly 6 Hz with the 512 checkpoint on an RTX 3090, less on nipg36's
-TITAN RTX. `log_every` prints the point count, the server's inference time, and
-— when the LiDAR is attached — the ratio between the cloud's near depth and the
-LiDAR's forward range, which is the cheapest check that CUT3R's metric scale is
-actually metric.
+Then, with the tunnel up (see `RoboCamStreamProcessing/link/README.md` — a node
+that looks hung is usually a tunnel that is down) and a server behind it:
+
+```bash
+ros2 launch mecanumbot_deep3r deep3r.launch.py
+ros2 topic hz   /mecanumbot/deep3r/points          # ~6 Hz on an RTX 3090
+ros2 topic echo /mecanumbot/deep3r/map_agreement   # the server's verdict
+```
+
+`enable_map_loop` defaults to true and is what makes this a loop rather than a
+one-way stream: the pose, grid and scan go up, and the verdict, the target and
+the pose hint come back. Turn it off only to benchmark the transport:
+
+```bash
+ros2 launch mecanumbot_deep3r deep3r.launch.py enable_map_loop:=false
+```
+
+With it off, the server has nothing to place the cloud against, no
+`MapCloudAgreement` is published, and the explorer's `CLOUD` exit criterion can
+never be satisfied — so **T1 never finishes**, and nothing in the robot's logs
+says why. That was the state of this package until 2026-09-08; see
+`RoboCamStreamProcessing/docs/INTEGRATION.md`.
+
+Expect roughly 6 Hz with the 512 checkpoint on an RTX 3090, less on a TITAN RTX.
+`log_every` prints the point count, the server's inference time, and — when the
+LiDAR is attached — the ratio between the cloud's near depth and the LiDAR's
+forward range, which is the cheapest check that CUT3R's metric scale is actually
+metric.
 
 ## Tests
 

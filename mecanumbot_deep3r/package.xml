@@ -13,6 +13,11 @@
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <!-- The map loop: the verdict's own type, the detections it routes to the
+       seek tree, and the TF the map-frame pose is read from. -->
+  <exec_depend>mecanumbot_msgs</exec_depend>
+  <exec_depend>vision_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
   <!-- pyzmq is not packaged as a rosdep key here; see the README. The client
        file itself is deployed from RoboCamStreamProcessing/link, not installed
        by this package. -->
