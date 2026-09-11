@@ -185,3 +185,74 @@ def test_a_non_advisory_hint_is_refused_outright():
     with pytest.raises(bridge.BridgeError, match="advisory"):
         bridge.pose_hint_is_usable({"advisory": False, "confidence": 1.0,
                                     "inliers": 500})
+
+
+# --- the deployed-client version guard -------------------------------------
+
+class TestTheClientVersionGuard:
+    """
+    A client older than this node must be refused with a usable message.
+
+    This pair is the one place where two repositories must move together and
+    only one of them is a git dependency: the node arrives by `git pull`, the
+    client file by `scp` from RoboCamStreamProcessing/link. Updating one and
+    not the other is the normal mistake, and unguarded it surfaces as a
+    TypeError from inside a constructor -- naming the symptom, not the cause.
+    """
+
+    def a_module(self, **kwargs):
+        import types
+        mod = types.ModuleType("fake_robocam_client")
+
+        class RoboCamClient:
+            def __init__(self, server, client_id="orin", **rest):
+                pass
+
+        # Rebuild __init__ with the given keyword names so inspect sees them.
+        names = ", ".join(f"{k}=None" for k in kwargs)
+        src = f"def __init__(self, server, client_id='orin'{',' if names else ''} {names}):\n    pass\n"
+        ns = {}
+        exec(src, ns)
+        RoboCamClient.__init__ = ns["__init__"]
+        mod.RoboCamClient = RoboCamClient
+        return mod
+
+    def test_a_current_client_passes(self):
+        mod = self.a_module(**{k: None for k in bridge.REQUIRED_CLIENT_KWARGS})
+        bridge.check_client_api(mod, "/tmp/robocam_client.py")   # must not raise
+
+    def test_an_old_client_is_refused_by_name(self):
+        mod = self.a_module()          # a v1 client: none of the kwargs
+        with pytest.raises(RuntimeError) as exc:
+            bridge.check_client_api(mod, "/tmp/robocam_client.py")
+        message = str(exc.value)
+        assert "older than this node" in message
+        assert "map_every_s" in message          # says which is missing
+        assert "scp" in message                  # says how to fix it
+        assert "enable_map_loop:=false" in message   # and how to proceed now
+
+    def test_a_partially_updated_client_is_also_refused(self):
+        """Half the map loop is not a working map loop."""
+        mod = self.a_module(map_every_s=None, on_map_update=None)
+        with pytest.raises(RuntimeError, match="on_agreement"):
+            bridge.check_client_api(mod, "/tmp/robocam_client.py")
+
+    def test_a_client_that_can_carry_a_frame_pose_is_recognised(self):
+        mod = self.a_module()
+
+        def _send_frame(self, img, pre_encoded, cv2, pose=None):
+            pass
+
+        mod.RoboCamClient._send_frame = _send_frame
+        assert bridge.client_takes_frame_pose(mod) is True
+
+    def test_an_older_client_is_not_asked_to_carry_one(self):
+        """Not refused: it still runs the loop, and loses only the frame pose."""
+        mod = self.a_module()
+
+        def _send_frame(self, img, pre_encoded, cv2):
+            pass
+
+        mod.RoboCamClient._send_frame = _send_frame
+        assert bridge.client_takes_frame_pose(mod) is False
+        assert bridge.client_takes_frame_pose(object()) is False

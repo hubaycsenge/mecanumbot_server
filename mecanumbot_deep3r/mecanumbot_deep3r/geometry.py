@@ -6,7 +6,22 @@ nothing but numpy, and one more runtime dependency on the robot for a dozen
 lines of algebra is a poor trade.
 """
 
+import math
+
 import numpy as np
+
+
+def yaw_from_quaternion(x, y, z, w):
+    """
+    Planar yaw from a quaternion, in radians.
+
+    Only the yaw: the grid is 2D and the server's comparison is a planar
+    problem, so roll and pitch would be carried across the link to be thrown
+    away.  The full quaternion travels too, for a consumer that wants it.
+    """
+    siny = 2.0 * (w * z + x * y)
+    cosy = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny, cosy)
 
 
 def quat_from_matrix(r):

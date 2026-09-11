@@ -59,6 +59,44 @@ mecanumbot_deep3r_client_node:
     base_frame: mecanumbot/base_link
     pose_rate_hz: 10.0
 
+    # --- the pose attached to each frame ----------------------------------
+    # The 10 Hz pose above is paired with a frame by whichever reached the
+    # server last, and says nothing about the camera. This attaches to every
+    # frame the base's map pose AT THE IMAGE'S STAMP (odom -> base interpolated
+    # to it, map -> odom at its latest) and the camera's pose from the neck. The
+    # server then ignores its own fixed camera mount for this robot, and once it
+    # has seen one, does not place a frame that arrives without it.
+    send_frame_pose: true
+    odom_frame: mecanumbot/odom
+    # How long a frame waits for odometry to reach its stamp before it goes
+    # without a pose. Blocks the client's thread, so keep it short.
+    pose_lookup_timeout_s: 0.05
+
+    # The camera from the neck, NOT from TF: the URDF's head_link and
+    # camera_link are rotated for the meshes, and in TF the camera looks
+    # sideways at every neck angle. See mecanumbot_deep3r/camera_pose.py.
+    # false sends the base pose only, and the server's mount applies.
+    send_camera_pose: true
+    # opencr_state.pos_n is the neck's GOAL position, echoed back by the
+    # firmware; the head reaches it a servo's travel time later.
+    neck_topic: opencr_state
+    neck_stale_s: 0.5
+    camera:
+      # base_link, metres. Pivot and lever are the URDF's translations; at
+      # level they give the 0.13 / 0.21 perception uses for the same camera.
+      pivot_x: 0.1063
+      pivot_z: 0.1679
+      lever_x: 0.022
+      lever_z: 0.038
+      # The trees' neck_level_pos (6.0 board units) in servo ticks.
+      level_ticks: 600.0
+      # The constant mecanumbot_sensorproc_node uses for the same servo.
+      rad_per_tick: 0.005061
+      # UNMEASURED. The tilt of the lens at level_ticks, positive up. Nothing
+      # establishes that the "neutral driving gaze" is optically level; measure
+      # it (e.g. a horizon line through the image centre) and set it here.
+      pitch_at_level_deg: 0.0
+
     # The grid is large and not perishable; one upload every few seconds is
     # plenty, and uploading it per frame would spend more of the uplink on a
     # room that is not changing than on the images of it that are.
@@ -89,3 +127,11 @@ mecanumbot_deep3r_client_node:
     # inliers is the reconstruction agreeing with one corner of the room.
     hint_min_confidence: 0.5
     hint_min_inliers: 40
+
+    # Which run this is. Empty mints a fresh one at every node start, which is
+    # what you want: the server is a long-lived Slurm job that outlives many
+    # robot restarts, and it clears its reconstruction, its T1 keyframes and its
+    # remembered target whenever this changes. A reconnect after a dropped
+    # tunnel keeps the same value, so a WiFi blip does not throw away a good
+    # scan. Set it explicitly only to resume a run across a node restart.
+    run_id: ""

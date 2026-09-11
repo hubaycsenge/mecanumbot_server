@@ -20,7 +20,7 @@ a few minutes on carpet. So the pose must be in ``map``. But T1 runs under
 slam_toolbox, which publishes **no** ``/amcl_pose``; the only map-frame pose
 available during exploration is the ``map -> base_link`` transform. Reading TF
 works unchanged under slam_toolbox in T1 and AMCL in T2, which is also what
-``mecanumbot_frontier_explorer`` does and for the same reason.
+``mecanumbot_autoslam`` does and for the same reason.
 
 Sending ``/odom`` instead would not fail loudly. The server would reject every
 pose as ``bad_odom``, the comparison would never run, ``mean_agreement`` would
@@ -36,18 +36,8 @@ import threading
 import numpy as np
 from rclpy.duration import Duration
 
-
-def yaw_from_quaternion(x, y, z, w):
-    """
-    Planar yaw from a quaternion, in radians.
-
-    Only the yaw: the grid is 2D and the server's comparison is a planar
-    problem, so roll and pitch would be carried across the link to be thrown
-    away.  The full quaternion travels too, for a consumer that wants it.
-    """
-    siny = 2.0 * (w * z + x * y)
-    cosy = 1.0 - 2.0 * (y * y + z * z)
-    return math.atan2(siny, cosy)
+from . import camera_pose
+from .geometry import yaw_from_quaternion
 
 
 class _Queued:
@@ -168,6 +158,145 @@ class TfOdomSource:
 
     def close(self):
         self.request_stop()
+
+
+class NeckTracker:
+    """
+    The neck's last reported position, from ``opencr_state``.
+
+    ``pos_n`` is the servo's **goal**: the firmware echoes the last command back
+    and never reads the AX-12A's present position.  The head this describes is
+    where it was told to be, which it reaches a servo's travel time later.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._ticks = None
+        self._stamp_ns = 0
+        self.readings = 0
+
+    def submit(self, msg):
+        stamp_ns = (int(msg.header.stamp.sec) * 1_000_000_000
+                    + int(msg.header.stamp.nanosec))
+        with self._lock:
+            self._ticks = int(msg.pos_n)
+            self._stamp_ns = stamp_ns
+            self.readings += 1
+
+    def at(self, stamp_ns, stale_s):
+        """
+        Return ``(ticks, age_ms)`` for an image taken at ``stamp_ns``, or None.
+
+        None when there has been no reading, or the newest is further than
+        ``stale_s`` from the image in either direction: a board that stopped
+        publishing leaves a plausible last value behind, and that is the one to
+        refuse.
+        """
+        with self._lock:
+            ticks, reading_ns = self._ticks, self._stamp_ns
+        if ticks is None:
+            return None
+        age_ms = (int(stamp_ns) - reading_ns) / 1e6
+        if abs(age_ms) > float(stale_s) * 1000.0:
+            return None
+        return ticks, age_ms
+
+
+class FramePoser:
+    """
+    The pose to attach to one frame: where the base and the camera were.
+
+    Called on the client's thread as each frame is handed over, with the
+    image's own ROS stamp.  Returns the dict ``robocam.wire.frame(pose=...)``
+    describes, or None -- sent as "no pose for this frame", which a server that
+    has seen this robot's camera pose answers by not placing it.  The rule is
+    ``TfOdomSource``'s: a pose that cannot be had is skipped, never substituted.
+
+    **The base** is ``map -> base`` at the image's stamp: ``odom -> base``
+    interpolated to that instant and ``map -> odom`` at its latest, which is
+    ``lookup_transform_full`` with ``odom`` as the fixed frame.  Dead reckoning
+    is what moves between frames and is published fast enough to interpolate;
+    SLAM's correction moves slowly and is published late, so asking for it at
+    the image's stamp would fail on nearly every frame.  The 10 Hz stream, by
+    contrast, pairs a frame with whichever pose reached the server last.
+
+    **The camera** is ``camera_pose.NeckCamera`` at the neck's last position, or
+    nothing when ``camera`` is None -- not TF, for the reason that module gives.
+    """
+
+    def __init__(self, node, buffer, neck, camera, *, map_frame="map",
+                 odom_frame="mecanumbot/odom", base_frame="mecanumbot/base_link",
+                 lookup_timeout_s=0.05, neck_stale_s=0.5):
+        self.node = node
+        self._buffer = buffer
+        self.neck = neck
+        self.camera = camera
+        self.map_frame = str(map_frame)
+        self.odom_frame = str(odom_frame)
+        self.base_frame = str(base_frame)
+        self.lookup_timeout_s = float(lookup_timeout_s)
+        self.neck_stale_s = float(neck_stale_s)
+        self.poses = 0
+        self.lookups_failed = 0
+        self.neck_missing = 0
+        self.neck_implausible = 0
+        self._warned = set()
+
+    def _warn_once(self, key, text):
+        if key not in self._warned:
+            self._warned.add(key)
+            self.node.get_logger().warn(text)
+
+    def __call__(self, stamp_ns):
+        from rclpy.time import Time
+
+        camera = None
+        info = None
+        age_ms = 0.0
+        if self.camera is not None:
+            reading = self.neck.at(stamp_ns, self.neck_stale_s)
+            if reading is None:
+                self.neck_missing += 1
+                self._warn_once(
+                    "neck",
+                    f"no neck position within {self.neck_stale_s:.2f} s of a frame; "
+                    "frames go without a pose, and so are not placed, until there is one")
+                return None
+            ticks, age_ms = reading
+            camera = self.camera.extrinsic(ticks)
+            if camera is None:
+                self.neck_implausible += 1
+                self._warn_once(
+                    "implausible",
+                    f"neck at {ticks} ticks is a pitch of "
+                    f"{math.degrees(self.camera.pitch(ticks)):.0f} deg, which the head "
+                    "cannot have; those frames go without a pose")
+                return None
+            info = {"source": "neck_model", "neck_ticks": int(ticks),
+                    "pitch_deg": round(math.degrees(self.camera.pitch(ticks)), 2)}
+
+        try:
+            tf = self._buffer.lookup_transform_full(
+                self.map_frame, Time(),
+                self.base_frame, Time(nanoseconds=int(stamp_ns)),
+                self.odom_frame, timeout=Duration(seconds=self.lookup_timeout_s),
+            )
+        except Exception as exc:  # tf2 raises several unrelated types
+            self.lookups_failed += 1
+            self._warn_once(
+                "tf",
+                f"no {self.map_frame} -> {self.base_frame} at a frame's stamp ({exc}); "
+                "such frames go without a pose")
+            return None
+
+        t = tf.transform.translation
+        q = tf.transform.rotation
+        self.poses += 1
+        return camera_pose.frame_pose_header(
+            (t.x, t.y, t.z), (q.x, q.y, q.z, q.w),
+            frame=self.map_frame, child_frame=self.base_frame,
+            age_ms=age_ms, camera=camera, camera_info=info,
+        )
 
 
 class TopicMapSource:

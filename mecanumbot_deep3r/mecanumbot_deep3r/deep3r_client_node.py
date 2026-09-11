@@ -34,6 +34,7 @@ under load, which would break any scheme based on counting.
 
 import collections
 import importlib.util
+import math
 import os
 import queue
 import threading
@@ -51,9 +52,10 @@ from std_msgs.msg import Bool, Header, String
 from vision_msgs.msg import (Detection3D, Detection3DArray,
                              ObjectHypothesisWithPose)
 
-from mecanumbot_msgs.msg import MapCloudAgreement
+from mecanumbot_msgs.msg import MapCloudAgreement, OpenCRState
 
 from . import bridge
+from . import camera_pose
 from . import cloud as cloud_codec
 from . import sources as ros_sources
 from .geometry import quat_from_matrix
@@ -85,6 +87,9 @@ class RosImageSource:
         #: (monotonic_ns at hand-over, ROS stamp ns) for reply correlation.
         self.handovers = collections.deque(maxlen=256)
         self.dropped = 0
+        #: Called with each frame's stamp at hand-over; its answer rides on the
+        #: frame.  None sends frames exactly as before protocol 2's frame pose.
+        self.poser = None
 
     def submit(self, jpeg, stamp_ns):
         """Offer a frame; drop the oldest rather than block the ROS executor."""
@@ -104,10 +109,17 @@ class RosImageSource:
                 jpeg, stamp_ns = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
+            # The pose first: its TF lookup may wait a few tens of milliseconds
+            # for odometry to catch up with the image, and the hand-over time
+            # should be the one closest to the send.
+            pose = self.poser(stamp_ns) if self.poser is not None else None
             self.handovers.append((time.monotonic_ns(), stamp_ns))
             # (None, bytes) means "already encoded" -- see the client's CSI
             # source, which does the same with its hardware-encoded frames.
-            yield None, jpeg
+            if self.poser is None:
+                yield None, jpeg
+            else:
+                yield None, jpeg, pose
 
     def close(self):
         self._stop.set()
@@ -132,6 +144,7 @@ def _load_client(path):
     spec = importlib.util.spec_from_file_location("robocam_client", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    bridge.check_client_api(module, path)
     return module
 
 
@@ -176,6 +189,22 @@ class Deep3RClientNode(Node):
                 ("map_frame", "map"),
                 ("base_frame", "mecanumbot/base_link"),
                 ("pose_rate_hz", 10.0),
+                # The pose attached to each frame: the base at the image's own
+                # stamp, and the camera from the neck.  See camera_pose.py for
+                # why the camera is a model and not a TF lookup.
+                ("send_frame_pose", True),
+                ("odom_frame", "mecanumbot/odom"),
+                ("pose_lookup_timeout_s", 0.05),
+                ("send_camera_pose", True),
+                ("neck_topic", "opencr_state"),
+                ("neck_stale_s", 0.5),
+                ("camera.pivot_x", 0.1063),
+                ("camera.pivot_z", 0.1679),
+                ("camera.lever_x", 0.022),
+                ("camera.lever_z", 0.038),
+                ("camera.level_ticks", 600.0),
+                ("camera.rad_per_tick", 0.005061),
+                ("camera.pitch_at_level_deg", 0.0),
                 ("map_every_s", 5.0),
                 # What the robot publishes from what comes back.
                 ("agreement_topic", "/mecanumbot/deep3r/map_agreement"),
@@ -192,6 +221,14 @@ class Deep3RClientNode(Node):
                 # cannot see.  These only gate whether it is worth logging.
                 ("hint_min_confidence", 0.5),
                 ("hint_min_inliers", 40),
+                # Which run this is. Empty means "mint a fresh one", which is
+                # what you want: the server wipes its reconstruction, keyframes
+                # and remembered target when this changes, so relaunching the
+                # robot gives it a clean slate rather than folding a new pass
+                # into the last room's state. A reconnect after a dropped
+                # tunnel keeps the same value and does not wipe. Set it
+                # explicitly only to *resume* a run across a node restart.
+                ("run_id", ""),
             ],
         )
         gp = self.get_parameter
@@ -239,6 +276,7 @@ class Deep3RClientNode(Node):
             server=str(gp("server").value),
             client_id=f"mecanumbot-{os.uname().nodename}",
             max_inflight=int(gp("max_inflight").value),
+            run_id=(str(gp("run_id").value) or None),
             on_result=self._on_result,
             map_every_s=float(gp("map_every_s").value),
             # The three the server sends unasked.  Handed straight to a queue:
@@ -262,6 +300,12 @@ class Deep3RClientNode(Node):
                f"pose from {gp('map_frame').value} -> {gp('base_frame').value})"
                if self.map_loop else "; map loop OFF")
         )
+        # Logged because it is the join between this robot's logs and the
+        # server's: the server reports the same string when it wipes, so a run
+        # that started against stale state is visible from either end.
+        self.get_logger().info(
+            f"run {self.client.run_id} -- the server clears its reconstruction, "
+            "keyframes and remembered target for a run it has not seen")
 
     def _setup_map_loop(self, gp, client_module):
         """
@@ -300,6 +344,7 @@ class Deep3RClientNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
+        self._setup_frame_pose(gp, client_module, sensor_qos)
         self.create_subscription(
             OccupancyGrid, str(gp("map_topic").value),
             lambda msg: self.map_source.submit(msg), latched)
@@ -325,6 +370,55 @@ class Deep3RClientNode(Node):
         self._agreements_out = 0
         self._founds_out = 0
         self.create_timer(0.05, self._drain_announcements)
+
+    def _setup_frame_pose(self, gp, client_module, sensor_qos):
+        """
+        Attach the robot's pose, and its camera's, to every frame.
+
+        Part of the map loop because it needs the TF buffer and is meaningless
+        without a map to place clouds in.  A client file too old to carry it
+        costs the per-frame pose and nothing else, so it is a warning and not
+        the refusal ``check_client_api`` gives a client too old for the loop.
+        """
+        self.frame_poser = None
+        if not bool(gp("send_frame_pose").value):
+            return
+        if not bridge.client_takes_frame_pose(client_module):
+            self.get_logger().warn(
+                "the deployed robocam_client.py cannot attach a pose to a frame, so "
+                "clouds are placed with the 10 Hz pose and the server's fixed camera "
+                "mount whatever the neck is doing. Redeploy it from "
+                "RoboCamStreamProcessing/link.")
+            return
+
+        camera = None
+        self.neck = None
+        if bool(gp("send_camera_pose").value):
+            camera = camera_pose.NeckCamera(
+                pivot_x=float(gp("camera.pivot_x").value),
+                pivot_z=float(gp("camera.pivot_z").value),
+                lever_x=float(gp("camera.lever_x").value),
+                lever_z=float(gp("camera.lever_z").value),
+                level_ticks=float(gp("camera.level_ticks").value),
+                rad_per_tick=float(gp("camera.rad_per_tick").value),
+                pitch_at_level=math.radians(float(gp("camera.pitch_at_level_deg").value)),
+            )
+            self.neck = ros_sources.NeckTracker()
+            self.create_subscription(
+                OpenCRState, str(gp("neck_topic").value), self.neck.submit, sensor_qos)
+            # Logged, as perception logs its camera height: a run should say what
+            # it assumed about where the camera was.
+            self.get_logger().info(camera.describe())
+
+        self.frame_poser = ros_sources.FramePoser(
+            self, self._tf_buffer, self.neck, camera,
+            map_frame=str(gp("map_frame").value),
+            odom_frame=str(gp("odom_frame").value),
+            base_frame=str(gp("base_frame").value),
+            lookup_timeout_s=float(gp("pose_lookup_timeout_s").value),
+            neck_stale_s=float(gp("neck_stale_s").value),
+        )
+        self.source.poser = self.frame_poser
 
     # -- plumbing ------------------------------------------------------------
 
@@ -406,12 +500,16 @@ class Deep3RClientNode(Node):
 
         if self.log_every and self._clouds_out % self.log_every == 1:
             check = data.get("scale_check") or {}
+            poser = getattr(self, "frame_poser", None)
             self.get_logger().info(
                 f"cloud map {cloud_map_id} frame {data.get('frames_in_state')}: "
                 f"{points.shape[0]} pts, infer {data.get('infer_ms')} ms, "
                 f"in {self._frames_in} dropped {self.source.dropped}"
                 + (f", lidar/cloud ratio {check['ratio']}" if check.get("ratio")
                    else "")
+                + (f", pose {result.get('pose_source') or 'none'}"
+                   f" (frame poses {poser.poses}, tf misses {poser.lookups_failed},"
+                   f" neck missing {poser.neck_missing})" if poser is not None else "")
             )
 
     # -- the map loop --------------------------------------------------------

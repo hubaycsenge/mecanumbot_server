@@ -214,3 +214,63 @@ def pose_hint_is_usable(header, min_confidence=0.0, min_inliers=0):
         raise BridgeError("pose_hint arrived with advisory=false; refusing it")
     return (float(header.get("confidence", 0.0)) >= float(min_confidence)
             and int(header.get("inliers", 0)) >= int(min_inliers))
+
+
+#: Constructor keywords this node hands the client. Each arrived with protocol
+#: 2; a client older than that has none of them.
+REQUIRED_CLIENT_KWARGS = (
+    "map_every_s", "on_map_update", "on_pose_hint", "on_found", "on_agreement",
+    "run_id",
+)
+
+
+def client_takes_frame_pose(module):
+    """
+    Say whether a deployed client can attach a pose to a frame.
+
+    Checked rather than required, unlike the map-loop keywords: a client
+    without it still runs the whole loop and loses only the per-frame pose,
+    which the node says once at startup.  Refusing to start over it would take
+    the robot's T1 down for an accuracy problem.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(module.RoboCamClient._send_frame).parameters
+    except (AttributeError, ValueError, TypeError):
+        return False
+    return "pose" in params
+
+
+def check_client_api(module, path):
+    """
+    Refuse a deployed client older than this node, with a usable message.
+
+    This pair is the one place in the workspace where two repositories have to
+    be updated together and only one of them is a git dependency: the node comes
+    from `mecanumbot_server` via `git pull`, and `robocam_client.py` is a single
+    file `scp`-ed from `RoboCamStreamProcessing/link`. Updating the workspace
+    without redeploying the file is therefore the normal mistake, not an exotic
+    one -- and left alone it surfaces as `TypeError: __init__() got an
+    unexpected keyword argument 'map_every_s'` from inside a constructor, which
+    names the symptom and not the cause.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(module.RoboCamClient.__init__).parameters
+    except (AttributeError, ValueError, TypeError):  # pragma: no cover
+        return          # not introspectable; let the real call fail normally
+
+    missing = [k for k in REQUIRED_CLIENT_KWARGS if k not in params]
+    if not missing:
+        return
+    raise RuntimeError(
+        f"the robocam_client.py at {path} is older than this node: it does not "
+        f"accept {', '.join(missing)}.\n"
+        "That file is deployed by scp, not by git, so a `git pull` of this "
+        "workspace updates the node and leaves the client behind. Redeploy it:\n"
+        "  scp <host>:.../RoboCamStreamProcessing/link/robocam_client.py ~/\n"
+        "Or run without the map loop until you do:\n"
+        "  ros2 launch mecanumbot_deep3r deep3r.launch.py enable_map_loop:=false"
+    )

@@ -51,6 +51,68 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | `max_inflight` | `2` | Frames awaiting a reply. |
 | `queue_depth` | `2` | Frames buffered between the subscription and the client. |
 | `log_every` | `30` | Log one line every N clouds; 0 disables. |
+| `send_frame_pose` | `true` | Attach the robot's map pose at the image's stamp to every frame. See below. |
+| `odom_frame` | `mecanumbot/odom` | Fixed frame for that lookup: `odom -> base` at the stamp, `map -> odom` at its latest. |
+| `pose_lookup_timeout_s` | `0.05` | How long a frame waits for odometry to reach its stamp. |
+| `send_camera_pose` | `true` | Attach the camera's pose from the neck model as well. |
+| `neck_topic` / `neck_stale_s` | `opencr_state` / `0.5` | Where the neck position comes from, and how far from a frame it may be. |
+| `camera.pivot_x` / `_z`, `camera.lever_x` / `_z` | `0.1063` / `0.1679`, `0.022` / `0.038` | The neck pivot and the pivot-to-lens lever, in `base_link`. |
+| `camera.level_ticks` | `600.0` | Servo ticks of the trees' `neck_level_pos`. |
+| `camera.rad_per_tick` | `0.005061` | Tilt per servo tick. |
+| `camera.pitch_at_level_deg` | `0.0` | **Unmeasured.** Lens tilt at `level_ticks`, positive up. |
+
+A few more subscriptions come with the map loop: `/map`, `/scan`, the explorer's
+`finished` latch, the seek request, and `opencr_state` for the neck.
+
+## Where the camera was, per frame
+
+The server places each cloud with `T_map_base · T_base_camera`. It used to take
+the first from the 10 Hz pose stream — whichever pose reached it last — and the
+second from one fixed mount in its own config. On this robot both are wrong
+while anything moves: the pose can be a tenth of a second away from the image,
+and the camera sits on a neck that the fetch tree sweeps continuously.
+
+So every frame now carries its own pose (`wire.frame(pose=...)` in
+RoboCamStreamProcessing):
+
+- **The base** is `map -> base_link` **at the image's stamp**, looked up with
+  `odom` as the fixed frame: dead reckoning interpolated to that instant, SLAM's
+  slow correction at its latest.
+- **The camera** comes from a neck model in `camera_pose.py`: a pivot on the
+  base, a lever to the lens that turns with the head, and a tilt linear in the
+  neck's servo ticks. At level it puts the lens at (0.128, 0.206) m, matching
+  the 0.13 / 0.21 that `mecanumbot_sensorprocess_smart` uses.
+
+**It is not a TF lookup, and that is not an oversight.** The URDF's `head_link`
+and `camera_link` are rotated 90° each for the meshes; composed,
+`camera_rgb_optical_frame` looks along the neck's own axis — to the robot's
+right — at every neck angle, so in TF the neck spins the image instead of
+tilting it. Perception works around the same problem with measured parameters,
+and this does the same. Fixing the URDF is the better long-term answer, but it
+needs the neck's zero measured on the robot (`head_joint` in `joint_states` is
+uncalibrated, and the simulator converts ticks with the opposite sign).
+
+Two assumptions to know about:
+
+- **`pitch_at_level_deg` is unmeasured.** Nothing establishes that the trees'
+  "neutral driving gaze" (`neck_level_pos` 6.0) is optically level. A cloud
+  that is consistently tilted, or a `pose_hint` that keeps offering the same
+  correction, points here.
+- **The neck position is the goal, not the head.** The firmware echoes the last
+  command back as `opencr_state.pos_n` and never reads the AX-12A's present
+  position, so during a sweep the model is ahead of the head by the servo's
+  travel time.
+
+A frame whose pose cannot be had — no TF at its stamp, no neck reading within
+`neck_stale_s` — goes **without** one, rather than with the last good one. The
+server, having seen a camera pose from this robot, does not place it. The log
+line every `log_every` clouds says how many frames had a pose and why the rest
+did not, and each result's `pose_source` says `frame` or `stream`; the server's
+comparison stats say `camera_from: robot` or `config`.
+
+This needs a `robocam_client.py` that can carry the pose. An older one still
+runs the whole loop; the node says so once at startup and falls back to the
+stream pose and the server's mount.
 
 ## Why it subscribes instead of opening the camera
 
@@ -139,9 +201,10 @@ metric.
 ## Tests
 
 ```bash
-PYTHONPATH=. python3 -m pytest test/test_cloud.py test/test_geometry.py -q
+PYTHONPATH=. python3 -m pytest test/test_cloud.py test/test_geometry.py test/test_camera_pose.py test/test_bridge.py -q
 ```
 
-Both run without ROS, without a server and without a GPU: the wire decoder and
-the rotation helper are plain numpy, and they are where a mistake produces a
-plausible cloud in the wrong place rather than an error.
+All run without ROS, without a server and without a GPU: the wire decoder, the
+rotation helper, the neck camera model and the announcement translation are
+plain numpy, and they are where a mistake produces a plausible cloud in the
+wrong place rather than an error.
