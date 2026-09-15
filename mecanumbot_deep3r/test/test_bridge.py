@@ -128,6 +128,55 @@ def test_a_missing_cloud_id_is_none_not_zero():
     assert bridge.cloud_map_id(header) is None
 
 
+# --- what counts as a new SLAM map -----------------------------------------
+
+def test_no_id_before_the_first_grid():
+    assert bridge.MapIdentity().map_id == ""
+
+
+def test_a_growing_map_keeps_its_id():
+    """
+    The T1 bug: slam_toolbox enlarges the grid on nearly every update.
+
+    Size and origin are not arguments at all, so they cannot change the id;
+    what is checked here is that a steadily growing observed area does not.
+    """
+    identity = bridge.MapIdentity()
+    first = identity.observe(0.05, "map", 400)
+    for known in (900, 1500, 2600, 4100):
+        assert identity.observe(0.05, "map", known) == first
+
+
+def test_a_loop_closure_is_not_a_restart():
+    """Re-rasterising loses a few percent of cells; the map frame stays put."""
+    identity = bridge.MapIdentity()
+    first = identity.observe(0.05, "map", 10000)
+    assert identity.observe(0.05, "map", 9700) == first
+
+
+def test_slam_starting_over_is_a_new_map():
+    identity = bridge.MapIdentity()
+    first = identity.observe(0.05, "map", 10000)
+    restarted = identity.observe(0.05, "map", 300)
+    assert restarted != first
+    # and the restarted map then grows under its own id
+    assert identity.observe(0.05, "map", 900) == restarted
+
+
+def test_a_different_resolution_or_frame_is_a_new_map():
+    identity = bridge.MapIdentity()
+    first = identity.observe(0.05, "map", 1000)
+    second = identity.observe(0.025, "map", 4000)
+    assert second != first
+    assert identity.observe(0.025, "other_map", 4000) != second
+
+
+def test_the_id_is_deterministic_across_a_node_restart():
+    """T1 sightings held by the server must still match after the client restarts."""
+    assert (bridge.MapIdentity().observe(0.05, "map", 5000)
+            == bridge.MapIdentity().observe(0.05, "map", 5000))
+
+
 # --- routing `found` -------------------------------------------------------
 
 def test_a_live_sighting_is_perception():

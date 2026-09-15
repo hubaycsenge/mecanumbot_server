@@ -9,14 +9,13 @@ everything in it rotated about the lens by the tilt.
 
 Not read from TF, deliberately
 ------------------------------
-The URDF's ``head_link`` is rotated 90 degrees about x and ``camera_link``
-another 90 about y, for the meshes. Composed, ``camera_rgb_optical_frame``
-looks along the neck's own rotation axis -- to the robot's right -- at every
-neck angle, so in TF the neck spins the image instead of tilting it.
-``mecanumbot_sensorprocess_smart`` met the same wall and took its camera height
-and tilt from measured parameters instead; this does the same, with the neck
-added. ``head_joint`` in ``joint_states`` is no way round it either: its zero is
-uncalibrated, and the simulator converts servo ticks with the opposite sign.
+Until 2026-09-14 the URDF's ``camera_rgb_optical_frame`` looked along the
+neck's own rotation axis -- to the robot's right -- at every neck angle, and
+``head_joint`` read ~40 degrees back at level. Both are fixed: TF now uses this
+module's model (zero at ``level_ticks``, positive up). This still does not
+read TF, because the pose has to be the neck *at the image's stamp*, and
+``pitch_at_level`` has nowhere to go in the URDF. The simulator also converts
+servo ticks with the opposite sign.
 
 The model
 ---------

@@ -72,9 +72,8 @@ mecanumbot_deep3r_client_node:
     # without a pose. Blocks the client's thread, so keep it short.
     pose_lookup_timeout_s: 0.05
 
-    # The camera from the neck, NOT from TF: the URDF's head_link and
-    # camera_link are rotated for the meshes, and in TF the camera looks
-    # sideways at every neck angle. See mecanumbot_deep3r/camera_pose.py.
+    # The camera from the neck, NOT from TF: the pose has to be the neck at
+    # the image's stamp. See mecanumbot_deep3r/camera_pose.py.
     # false sends the base pose only, and the server's mount applies.
     send_camera_pose: true
     # opencr_state.pos_n is the neck's GOAL position, echoed back by the

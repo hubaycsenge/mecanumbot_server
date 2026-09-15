@@ -36,7 +36,7 @@ import threading
 import numpy as np
 from rclpy.duration import Duration
 
-from . import camera_pose
+from . import bridge, camera_pose
 from .geometry import yaw_from_quaternion
 
 
@@ -303,18 +303,19 @@ class TopicMapSource:
     """
     The occupancy grid, from ``nav_msgs/OccupancyGrid``.
 
-    ``map_id`` is derived from the grid's own geometry rather than invented,
-    because it has to mean "the same map" across a reconnect: the client re-sends
-    the last grid when a session comes back, and a fresh random id would make the
-    server treat a continuing map as a new one and drop every patch keyed on the
-    old one.  Origin, resolution and size change together exactly when
-    slam_toolbox re-rasterises, which is the event that *should* change the id.
+    ``map_id`` names the SLAM session rather than being invented, because it has
+    to mean "the same map" across a reconnect: the client re-sends the last grid
+    when a session comes back, and a fresh random id would make the server treat
+    a continuing map as a new one.  It is **not** the grid's size or origin,
+    which slam_toolbox changes on nearly every update as the map grows; see
+    ``bridge.MapIdentity`` for what that broke.
     """
 
     def __init__(self, node, client_module):
         self.node = node
         self._client = client_module
         self._queue = _Queued()
+        self._identity = bridge.MapIdentity()
         self.maps_read = 0
         self.map_id = ""
 
@@ -329,8 +330,13 @@ class TopicMapSource:
                                       info.origin.orientation.y,
                                       info.origin.orientation.z,
                                       info.origin.orientation.w))
-        self.map_id = (f"{info.width}x{info.height}@{info.resolution:.4f}"
-                       f"+{origin[0]:.3f},{origin[1]:.3f}")
+        previous = self.map_id
+        self.map_id = self._identity.observe(
+            info.resolution, msg.header.frame_id, np.count_nonzero(cells != -1))
+        if previous and self.map_id != previous:
+            self.node.get_logger().warn(
+                f"SLAM map restarted: map_id {previous!r} -> {self.map_id!r}; "
+                "verdicts and sightings for the old map are dropped from here on")
         self.maps_read += 1
         self._queue.put(self._client.MapReading(
             cells=cells,

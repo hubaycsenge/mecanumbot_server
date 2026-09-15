@@ -116,6 +116,68 @@ def is_stale(header, current_map_id):
     return str(announced) != str(current_map_id)
 
 
+class MapIdentity:
+    """
+    The robot's SLAM map identity, which changes when the map frame does.
+
+    It used to be the grid's geometry -- ``<width>x<height>@<resolution>+<origin>``
+    -- on the reasoning that size and origin change exactly when slam_toolbox
+    re-rasterises.  They do not: slam_toolbox sizes the grid to the bounding box
+    of every scan so far, so during T1 the width, height and origin change on
+    almost every ``/map`` update, whenever the robot sees past the previous box.
+    The map frame does not move when that happens -- a point at (3.2, 1.4) m is
+    still at (3.2, 1.4) m -- but every such update was a new ``map_id``, and
+    three things are keyed on it:
+
+    * the server drops a verdict computed against a grid it has since replaced,
+      and this node drops one computed against a grid it has since received, so
+      most verdicts never reached the robot;
+    * the ones that did carried a new id each time, and
+      ``mecanumbot_map_agreement`` clears every accumulated region on a new id,
+      so no keepout outlived one ``/map`` update;
+    * and T1's ``CLOUD`` exit criterion, starved of verdicts, could not be met.
+
+    What does move the map frame is SLAM starting over, so that is what bumps
+    the id: a different resolution or frame, or the observed area collapsing to
+    under ``restart_fraction`` of what it was.  A loop closure redraws the map
+    with a few percent fewer cells and is not a restart; a restarted
+    slam_toolbox begins again from a single scan.
+
+    The id is deterministic -- no process token in it -- so a reconnect, or this
+    node restarting while SLAM carries on, still names the same map, and the
+    server's T1 sightings stay valid into T2.
+    """
+
+    def __init__(self, restart_fraction=0.5):
+        self.restart_fraction = float(restart_fraction)
+        self.session = 0
+        self._resolution = None
+        self._frame = None
+        self._known_cells = None
+
+    def observe(self, resolution, frame, known_cells):
+        """Take one grid's resolution, frame and observed-cell count; return the id."""
+        resolution = round(float(resolution), 4)
+        frame = str(frame or "map")
+        known_cells = int(known_cells)
+        if self._known_cells is not None and (
+                resolution != self._resolution
+                or frame != self._frame
+                or known_cells < self._known_cells * self.restart_fraction):
+            self.session += 1
+        self._resolution = resolution
+        self._frame = frame
+        self._known_cells = known_cells
+        return self.map_id
+
+    @property
+    def map_id(self):
+        """Return the current id, or ``""`` before any grid has been seen."""
+        if self._resolution is None:
+            return ""
+        return f"{self._frame}@{self._resolution:.4f}#{self.session}"
+
+
 def cloud_map_id(header):
     """
     CUT3R's reconstruction session for this announcement, or ``None``.
