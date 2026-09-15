@@ -18,7 +18,7 @@ on the cluster; this repository is only the robot's end of the conversation.
 
 | Executable | Package | ROS node name | Interfaces |
 | --- | --- | --- | --- |
-| `mecanumbot_deep3r_client_node` | `mecanumbot_deep3r` | `mecanumbot_deep3r_client_node` | Subscribes `/camera/image_raw/compressed`; publishes `deep3r/points` (`PointCloud2`), `deep3r/pose` (`PoseStamped`), and the `map -> deep3r_world` transform. |
+| `mecanumbot_deep3r_client_node` | `mecanumbot_deep3r` | `mecanumbot_deep3r_client_node` (namespace `mecanumbot` in `deep3r.launch.py`) | Subscribes `/camera/image_raw/compressed`; publishes `deep3r/points` (`PointCloud2`), `deep3r/pose` (`PoseStamped`), and the `map -> deep3r_world` transform. With the map loop (on by default) it also reads `/map`, `/mecanumbot/scan`, `opencr_state`, `/mecanumbot/exploration/finished` and `/mecanumbot/seek/request`, and publishes `/mecanumbot/deep3r/map_agreement`, `/mecanumbot/seek/target` and `/mecanumbot/seek/detections`. |
 
 No nodes are implemented at the repository root — it only groups the package.
 
@@ -50,7 +50,8 @@ anything here — a node that looks hung is usually a tunnel that is down.
 
 ## Dependencies
 
-`mecanumbot_deep3r` depends on `rclpy`, `sensor_msgs` and `geometry_msgs`, and
+`mecanumbot_deep3r` depends on `rclpy`, `sensor_msgs`, `geometry_msgs`,
+`nav_msgs`, `std_msgs`, `tf2_ros`, `vision_msgs`, `mecanumbot_msgs` and numpy, and
 needs `pyzmq`, which is **not** declared in its `package.xml` because `rosdep`
 will not install it here (the same under-declaration the rest of the workspace
 has — see the root `CLAUDE.md`). Install it by hand on the robot:
@@ -93,7 +94,7 @@ cd mecanumbot_deep3r
 PYTHONPATH=. python3 -m pytest test/test_cloud.py test/test_geometry.py test/test_camera_pose.py test/test_bridge.py test/test_world_frame.py -q
 ```
 
-All run without ROS, without a server and without a GPU.
+66 tests; all run without ROS, without a server and without a GPU.
 
 ## Repository structure
 

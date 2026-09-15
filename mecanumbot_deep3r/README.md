@@ -36,13 +36,16 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | `deep3r/points` | `sensor_msgs/msg/PointCloud2` | The returned cloud: `xyz` + packed `rgb`, metres. |
 | `deep3r/pose` | `geometry_msgs/msg/PoseStamped` | CUT3R's camera pose for that frame, same frame as the cloud. Disable with `publish_pose`. |
 | `/tf` | `map -> deep3r_world` | Where CUT3R's world frame sits in the map, per cloud. Disable with `publish_world_tf`. |
+| `/mecanumbot/deep3r/map_agreement` | `mecanumbot_msgs/msg/MapCloudAgreement` | The server's 2D-map/cloud comparison. Map loop only. |
+| `/mecanumbot/seek/target` | `vision_msgs/msg/Detection3DArray` | Where the server remembers the requested object (`memory`). Map loop only. |
+| `/mecanumbot/seek/detections` | `vision_msgs/msg/Detection3DArray` | Where the server sees it now (`live`). Map loop only. |
 
 ### Parameters
 
 | Parameter | Default | Function |
 | --- | --- | --- |
 | `server` | `tcp://127.0.0.1:5555` | Local end of the forward tunnel — **not** the server's own address. |
-| `client_path` | `~/robocam_client.py` | The deployed standalone client; a directory is also accepted. |
+| `client_path` | `~/robocam_client.py` | The deployed standalone client; a directory is also accepted. This is the value in `deep3r.yaml` and `deep3r.launch.py`; the node's own declared default, which applies only without either, is `~/server/RoboCamStreamProcessing/link/robocam_client.py`. |
 | `camera_topic` | `/camera/image_raw/compressed` | Where frames come from. **Absolute**: the publisher is not namespaced and this node is. A relative name resolves to `/mecanumbot/camera/...`, which nothing publishes, and the node then sends no frames and logs no error. |
 | `cloud_topic` | `deep3r/points` | Point cloud output. |
 | `pose_topic` | `deep3r/pose` | Camera pose output. |
@@ -63,8 +66,16 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | `camera.level_ticks` | `600.0` | Servo ticks of the trees' `neck_level_pos`. |
 | `camera.rad_per_tick` | `0.005061` | Tilt per servo tick. |
 | `camera.pitch_at_level_deg` | `0.0` | **Unmeasured.** Lens tilt at `level_ticks`, positive up. |
+| `enable_map_loop` | `true` | The map loop: pose, grid and scan up; verdict, target and pose hint back. Also a launch argument. See *Running*. |
+| `map_topic` / `scan_topic` | `/map` / `/mecanumbot/scan` | The grid and the scan sent up. The LD08 driver is namespaced; nothing publishes `/scan`. |
+| `map_frame` / `base_frame` / `pose_rate_hz` | `map` / `mecanumbot/base_link` / `10.0` | The robot's map pose, read from TF (T1 runs under slam_toolbox, which publishes no `/amcl_pose`). |
+| `map_every_s` | `5.0` | Seconds between grid uploads. |
+| `agreement_topic` | `/mecanumbot/deep3r/map_agreement` | The verdict output. |
+| `seek_target_topic` / `seek_detections_topic` | `/mecanumbot/seek/target` / `/mecanumbot/seek/detections` | The seek tree's two inputs, kept apart on purpose. |
+| `finished_topic` / `request_topic` | `/mecanumbot/exploration/finished` / `/mecanumbot/seek/request` | The T1 latch that sends the server a phase change, and the free-text seek request. |
+| `hint_min_confidence` / `hint_min_inliers` | `0.5` / `40` | Only gate whether a `pose_hint` is logged; nothing applies one. |
 
-A few more subscriptions come with the map loop: `/map`, `/mecanumbot/scan`, the explorer's
+The map loop's subscriptions are `/map`, `/mecanumbot/scan`, the explorer's
 `finished` latch, the seek request, and `opencr_state` for the neck.
 
 ## Where the camera was, per frame
@@ -215,7 +226,7 @@ Things to know before relying on it:
 - **It is display and inspection, not navigation.** The per-frame cloud (≤4000
   points in 5 cm voxels) feeds nothing on the robot. The height decision the
   costmap needs comes from the server's agreement regions through
-  `mecanumbot_map_agreement` in `mecanumbot_custom_nav2`.
+  `mecanumbot_map_agreement_node` in `mecanumbot_custom_nav2`.
 
 ## Running
 
@@ -283,7 +294,7 @@ metric.
 PYTHONPATH=. python3 -m pytest test/test_cloud.py test/test_geometry.py test/test_camera_pose.py test/test_bridge.py test/test_world_frame.py -q
 ```
 
-All run without ROS, without a server and without a GPU: the wire decoder, the
+66 tests. All run without ROS, without a server and without a GPU: the wire decoder, the
 rotation helper, the neck camera model, the world frame's placement and the
 announcement translation are
 plain numpy, and they are where a mistake produces a plausible cloud in the
