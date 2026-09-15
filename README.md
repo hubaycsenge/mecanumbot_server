@@ -18,7 +18,7 @@ on the cluster; this repository is only the robot's end of the conversation.
 
 | Executable | Package | ROS node name | Interfaces |
 | --- | --- | --- | --- |
-| `mecanumbot_deep3r_client_node` | `mecanumbot_deep3r` | `mecanumbot_deep3r_client_node` | Subscribes `camera/image_raw/compressed`; publishes `deep3r/points` (`PointCloud2`), `deep3r/pose` (`PoseStamped`), and the `map -> deep3r_world` transform. |
+| `mecanumbot_deep3r_client_node` | `mecanumbot_deep3r` | `mecanumbot_deep3r_client_node` | Subscribes `/camera/image_raw/compressed`; publishes `deep3r/points` (`PointCloud2`), `deep3r/pose` (`PoseStamped`), and the `map -> deep3r_world` transform. |
 
 No nodes are implemented at the repository root — it only groups the package.
 
@@ -73,14 +73,18 @@ source install/setup.bash
 ## Quick run example
 
 ```bash
-# on the robot, tunnel up first
-ros2 launch mecanumbot_deep3r deep3r.launch.py
+# on the robot, tunnel up first. T1 starts the camera and this client itself:
+ros2 launch mecanumbot_autoslam launch_t1.launch.py
 ros2 topic hz /mecanumbot/deep3r/points
+
+# the client on its own needs the camera publisher first; nothing else starts it
+ros2 launch mecanumbot_camera_stream camera_compressed.launch.py width:=1280 height:=720
+ros2 launch mecanumbot_deep3r deep3r.launch.py
 ```
 
-`mecanumbot_deep3r` subscribes to `mecanumbot_camera_stream`'s compressed topic
-rather than opening the camera itself, so the onboard camera stack has to be
-running.
+`mecanumbot_deep3r` subscribes to `mecanumbot_camera_stream`'s compressed topic,
+`/camera/image_raw/compressed`, rather than opening the camera itself. See its
+README for why, and for the T1 launch that brings both up.
 
 ## Tests
 

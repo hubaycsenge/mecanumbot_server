@@ -5,6 +5,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -29,6 +30,14 @@ def generate_launch_description():
                 "benchmarking the transport against a server with compare off."
             ),
         ),
+        DeclareLaunchArgument(
+            "run_id", default_value="",
+            description=(
+                "Which run this is. Empty mints a fresh one, and the server "
+                "wipes its reconstruction for it. Pass a previous run's id "
+                "(logged at startup) to resume that run across a restart."
+            ),
+        ),
         Node(
             namespace="mecanumbot",
             package="mecanumbot_deep3r",
@@ -43,6 +52,9 @@ def generate_launch_description():
                 {"server": LaunchConfiguration("server")},
                 {"client_path": LaunchConfiguration("client_path")},
                 {"enable_map_loop": LaunchConfiguration("enable_map_loop")},
+                # value_type=str: an empty argument would otherwise be parsed
+                # as YAML into null, which is not a string parameter.
+                {"run_id": ParameterValue(LaunchConfiguration("run_id"), value_type=str)},
             ],
         ),
     ])

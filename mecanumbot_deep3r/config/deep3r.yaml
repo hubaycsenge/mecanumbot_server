@@ -14,7 +14,14 @@ mecanumbot_deep3r_client_node:
     # mecanumbot_camera_stream already owns the camera device, so frames come
     # from its topic. They are forwarded to the server as the JPEG they already
     # are -- no decode/re-encode on the robot.
-    camera_topic: camera/image_raw/compressed
+    #
+    # ABSOLUTE, and it has to be: the publisher is not namespaced and this node
+    # is, so the relative name this used to be resolved to
+    # /mecanumbot/camera/image_raw/compressed -- a topic nothing publishes. The
+    # node then ran, reached the server, and never sent a frame. In T1
+    # launch_t1.launch.py starts the publisher. Nothing starts it in T2 --
+    # perception.launch.py stopped including it -- so start it by hand there.
+    camera_topic: /camera/image_raw/compressed
 
     cloud_topic: deep3r/points
     pose_topic: deep3r/pose
@@ -51,7 +58,9 @@ mecanumbot_deep3r_client_node:
     enable_map_loop: true
 
     map_topic: /map
-    scan_topic: /scan
+    # The LD08 driver publishes under the robot's namespace; nothing publishes
+    # /scan, and with it the server's lidar/cloud scale check never ran.
+    scan_topic: /mecanumbot/scan
 
     # The pose is read from TF, not from a topic, and this is not a preference:
     # the server refuses to compare a pose against a grid drawn in a different

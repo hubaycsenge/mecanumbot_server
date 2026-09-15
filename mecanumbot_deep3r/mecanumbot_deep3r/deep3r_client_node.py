@@ -164,7 +164,10 @@ class Deep3RClientNode(Node):
                 # the port here. See RoboCamStreamProcessing/link/README.md.
                 ("server", "tcp://127.0.0.1:5555"),
                 ("client_path", "~/server/RoboCamStreamProcessing/link/robocam_client.py"),
-                ("camera_topic", "camera/image_raw/compressed"),
+                # Absolute: the camera publisher is not namespaced and this
+                # node is, so a relative name resolves to /mecanumbot/camera/...
+                # which nothing publishes.
+                ("camera_topic", "/camera/image_raw/compressed"),
                 ("cloud_topic", "deep3r/points"),
                 ("pose_topic", "deep3r/pose"),
                 ("publish_pose", True),
@@ -186,7 +189,8 @@ class Deep3RClientNode(Node):
                 # RoboCamStreamProcessing for what each side expects.
                 ("enable_map_loop", True),
                 ("map_topic", "/map"),
-                ("scan_topic", "/scan"),
+                # The LD08 driver is namespaced; there is no /scan on the robot.
+                ("scan_topic", "/mecanumbot/scan"),
                 # Poses come from TF, not from a topic: T1 runs under
                 # slam_toolbox, which publishes no /amcl_pose, and the server
                 # refuses to compare a pose against a grid in another frame.

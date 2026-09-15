@@ -27,7 +27,7 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 
 | Topic | Data type | Processing |
 | --- | --- | --- |
-| `camera/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | Forwarded to the server **as the JPEG it already is** — no decode/re-encode on the robot. |
+| `/camera/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | Forwarded to the server **as the JPEG it already is** — no decode/re-encode on the robot. |
 
 ### Publishers
 
@@ -43,7 +43,7 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | --- | --- | --- |
 | `server` | `tcp://127.0.0.1:5555` | Local end of the forward tunnel — **not** the server's own address. |
 | `client_path` | `~/robocam_client.py` | The deployed standalone client; a directory is also accepted. |
-| `camera_topic` | `camera/image_raw/compressed` | Where frames come from. |
+| `camera_topic` | `/camera/image_raw/compressed` | Where frames come from. **Absolute**: the publisher is not namespaced and this node is. A relative name resolves to `/mecanumbot/camera/...`, which nothing publishes, and the node then sends no frames and logs no error. |
 | `cloud_topic` | `deep3r/points` | Point cloud output. |
 | `pose_topic` | `deep3r/pose` | Camera pose output. |
 | `publish_pose` | `true` | Publish the pose alongside the cloud. |
@@ -53,6 +53,7 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | `max_inflight` | `2` | Frames awaiting a reply. |
 | `queue_depth` | `2` | Frames buffered between the subscription and the client. |
 | `log_every` | `30` | Log one line every N clouds; 0 disables. |
+| `run_id` | *(empty)* | Which run this is. Empty mints a fresh one at start-up, and the server wipes its reconstruction for a run it has not seen. Pass a previous id to resume; it is also a launch argument of `deep3r.launch.py`, `launch_autoslam.launch.py` and `launch_t1.launch.py`. |
 | `send_frame_pose` | `true` | Attach the robot's map pose at the image's stamp to every frame. See below. |
 | `odom_frame` | `mecanumbot/odom` | Fixed frame for that lookup: `odom -> base` at the stamp, `map -> odom` at its latest. |
 | `pose_lookup_timeout_s` | `0.05` | How long a frame waits for odometry to reach its stamp. |
@@ -63,7 +64,7 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | `camera.rad_per_tick` | `0.005061` | Tilt per servo tick. |
 | `camera.pitch_at_level_deg` | `0.0` | **Unmeasured.** Lens tilt at `level_ticks`, positive up. |
 
-A few more subscriptions come with the map loop: `/map`, `/scan`, the explorer's
+A few more subscriptions come with the map loop: `/map`, `/mecanumbot/scan`, the explorer's
 `finished` latch, the seek request, and `opencr_state` for the neck.
 
 ## Where the camera was, per frame
@@ -142,10 +143,17 @@ stream pose and the server's mount.
 
 ## Why it subscribes instead of opening the camera
 
-`mecanumbot_camera_stream` already owns the camera device on the Orin. A second
-process opening `/dev/video0` would either fail or take it away. Consuming the
-compressed topic also means the JPEG is already encoded, so frames are
-forwarded untouched rather than decoded and re-encoded on the robot's CPU.
+`mecanumbot_camera_stream`'s compressed publisher owns the camera device (the
+USB webcam, `/dev/video0`) whenever the topic exists. A second process opening
+the device would either fail or take it away. Consuming the compressed topic
+also means the JPEG is already encoded, so frames are forwarded untouched rather
+than decoded and re-encoded on the robot's CPU.
+
+The topic is **`/camera/image_raw/compressed`, absolute**. The publisher is not
+namespaced and this node is. Until 2026-09-15 `camera_topic` was relative and
+resolved to `/mecanumbot/camera/image_raw/compressed`, which nothing publishes.
+The node then ran and reached the server, but sent no frames and logged no
+error, so T1 could not finish.
 
 ## Timestamps
 
@@ -223,14 +231,31 @@ scp -P 10113 csengehubay@nipg36.inf.elte.hu:~/mecanumbot_repos/RoboCamStreamProc
 pip3 install pyzmq
 ```
 
-Then, with the tunnel up (see `RoboCamStreamProcessing/link/README.md` — a node
-that looks hung is usually a tunnel that is down) and a server behind it:
+**In T1 you do not launch this node yourself.** `mecanumbot_autoslam`'s
+`launch_autoslam.launch.py` includes `deep3r.launch.py` together with the camera
+publisher, and `launch_t1.launch.py` and the web GUI's Autoslam row both go
+through it. So, with the tunnel up (see `RoboCamStreamProcessing/link/README.md`
+— a node that looks hung is usually a tunnel that is down) and a server behind
+it:
 
 ```bash
-ros2 launch mecanumbot_deep3r deep3r.launch.py
+ros2 launch mecanumbot_autoslam launch_t1.launch.py
 ros2 topic hz   /mecanumbot/deep3r/points          # ~6 Hz on an RTX 3090
 ros2 topic echo /mecanumbot/deep3r/map_agreement   # the server's verdict
 ```
+
+On its own, for a transport check or T2, it needs something publishing
+`/camera/image_raw/compressed` first. Nothing else starts the camera: the base
+launch stopped, and so did perception. The camera is the robot's USB webcam:
+
+```bash
+ros2 launch mecanumbot_camera_stream camera_compressed.launch.py width:=1280 height:=720
+ros2 launch mecanumbot_deep3r deep3r.launch.py
+```
+
+Do not start a second client while one is running, for example this command
+next to a T1 launch. It is a second session with its own `run_id`, and the
+server wipes its reconstruction every time the `run_id` it sees changes.
 
 `enable_map_loop` defaults to true and is what makes this a loop rather than a
 one-way stream: the pose, grid and scan go up, and the verdict, the target and
