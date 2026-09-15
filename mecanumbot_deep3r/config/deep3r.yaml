@@ -20,11 +20,14 @@ mecanumbot_deep3r_client_node:
     pose_topic: deep3r/pose
     publish_pose: true
 
-    # CUT3R's own world frame, anchored on the first frame of each map_id, and
-    # NOT yet connected to the robot's TF tree -- nothing publishes a transform
-    # for it. See the README: publishing in the camera frame instead is the
-    # change that makes this usable by Nav2.
+    # CUT3R's own world frame, anchored on the first frame of each map_id.
     frame_id: deep3r_world
+    # Broadcast map_frame -> frame_id once per cloud, from the pose the frame
+    # was sent with composed with the pose CUT3R returned -- the server's own
+    # placement, so the cloud shows in RViz where the comparison put it. Not
+    # smoothed; the log line's "spread" says how much it wanders. Needs the map
+    # loop, send_frame_pose and send_camera_pose below.
+    publish_world_tf: true
 
     # Advertised metadata only; the server reports what it actually decoded
     # rather than what the client claimed, so these need not be exact.

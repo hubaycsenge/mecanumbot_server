@@ -35,6 +35,7 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | --- | --- | --- |
 | `deep3r/points` | `sensor_msgs/msg/PointCloud2` | The returned cloud: `xyz` + packed `rgb`, metres. |
 | `deep3r/pose` | `geometry_msgs/msg/PoseStamped` | CUT3R's camera pose for that frame, same frame as the cloud. Disable with `publish_pose`. |
+| `/tf` | `map -> deep3r_world` | Where CUT3R's world frame sits in the map, per cloud. Disable with `publish_world_tf`. |
 
 ### Parameters
 
@@ -46,7 +47,8 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | `cloud_topic` | `deep3r/points` | Point cloud output. |
 | `pose_topic` | `deep3r/pose` | Camera pose output. |
 | `publish_pose` | `true` | Publish the pose alongside the cloud. |
-| `frame_id` | `deep3r_world` | Frame the cloud and pose are stamped in. See the caveat below. |
+| `frame_id` | `deep3r_world` | Frame the cloud and pose are stamped in: CUT3R's world frame. |
+| `publish_world_tf` | `true` | Broadcast `map_frame -> frame_id` per cloud. Needs the map loop and both `send_frame_pose` and `send_camera_pose`. See below. |
 | `advertised_width` / `_height` / `_fps` | `1280` / `720` / `15.0` | Metadata the client announces. The server reports what it actually decoded, so these need not be exact. |
 | `max_inflight` | `2` | Frames awaiting a reply. |
 | `queue_depth` | `2` | Frames buffered between the subscription and the client. |
@@ -83,14 +85,38 @@ RoboCamStreamProcessing):
   neck's servo ticks. At level it puts the lens at (0.128, 0.206) m, matching
   the 0.13 / 0.21 that `mecanumbot_sensorprocess_smart` uses.
 
-**It is not a TF lookup, and that is not an oversight.** The URDF's `head_link`
-and `camera_link` are rotated 90° each for the meshes; composed,
-`camera_rgb_optical_frame` looks along the neck's own axis — to the robot's
-right — at every neck angle, so in TF the neck spins the image instead of
-tilting it. Perception works around the same problem with measured parameters,
-and this does the same. Fixing the URDF is the better long-term answer, but it
-needs the neck's zero measured on the robot (`head_joint` in `joint_states` is
-uncalibrated, and the simulator converts ticks with the opposite sign).
+**It is not a TF lookup, although TF now agrees with it.** Until 2026-09-14,
+`camera_rgb_optical_frame` in the URDF looked along the neck's own axis (to the
+robot's right) at every neck angle. Also, `head_joint` read about 40° back at
+level. Both are fixed in `mecanumbot` (`mecanumbot_description` URDF,
+`mecanumbot_sensorproc_node`): `head_joint` is zero at `level_ticks` (600) and
+positive looking up, the same convention as this model.
+
+Checked by composing the URDF chain against `NeckCamera.extrinsic` from 200 to
+860 ticks:
+
+- **Rotation:** the two agree to within 0.1°. The remainder comes from the URDF
+  writing `1.57` where it means π/2.
+- **Position:** `camera_link`'s origin agrees with the model's lens to within
+  0.03 mm. `camera_rgb_optical_frame` sits **14.5 mm** further along, because of
+  `camera_rgb_joint`'s offset, which the model does not include. Nobody has
+  measured which of the two is where the lens actually is.
+
+The model is still used instead of TF, for three reasons:
+
+- **The pose has to be the neck at the image's stamp.** The model reads the
+  neck reading closest to that stamp directly.
+- **`pitch_at_level_deg` has nowhere to go in the URDF.** TF would drop the one
+  calibration this placement has.
+- **The simulator still uses the old tick convention.** `mecanumbot_sim`'s
+  `accessory_ticks_to_angle` is `2.618 - ticks · rad_per_tick`: the opposite
+  sign and a different zero. In simulation, `head_joint` in TF does not mean
+  what it means on the robot.
+
+Since the two now agree, TF is the cross-check. If RViz shows the cloud tilted
+against `camera_rgb_optical_frame`, one of them has drifted from the other.
+`camera_pose.py` and `mecanumbot_sensorproc_node.NECK_LEVEL_TICKS` have to
+change together, as the comment there says.
 
 Two assumptions to know about:
 
@@ -137,23 +163,51 @@ was sent, which matters because the client drops frames at the source under
 load. Anything based on counting frames would drift silently the first time it
 did.
 
-## The frame is not connected to TF yet
+## The world frame in TF: `map -> deep3r_world`
 
-`frame_id` defaults to `deep3r_world`, and **nothing publishes a transform for
-it.** The cloud arrives in CUT3R's own world frame, anchored on the first frame
-of each `map_id` and drifting independently of `odom`. Feeding that to a
-costmap means two odometry estimates fighting, and every reset teleports the
-map.
+The cloud arrives in CUT3R's own world frame, anchored on the first frame of
+each reconstruction session with an origin and orientation nobody chose. The
+node broadcasts where that frame sits in the map, **once per cloud, stamped
+with the cloud's own stamp**:
 
-The fix is on the server, not here: return the per-frame points in the
-*camera* frame (CUT3R's `pts3d_in_self_view`, skipping the pose transform) and
-let the existing `head_link → base_footprint → odom → map` chain place them,
-with the costmap accumulating as it already does for the LiDAR. Until that
-option exists, this node is useful for inspecting the reconstruction in RViz
-against a static transform, not for navigation.
+```text
+T_map_world = T_map_base · T_base_optical · (pose_c2w)⁻¹
+```
 
-`map_id` changes are logged as a warning for the same reason: the world frame
-restarts with them, so anything accumulated against the previous one is void.
+`T_map_base` and `T_base_optical` are the pose this node attached to the frame
+(see above), kept alongside the hand-over record. `pose_c2w` is the camera pose
+the server returned with the cloud. This is the same product over the same
+inputs as `map_from_cloud_matrix` in the server's `robocam/compare.py`,
+including its planar base (yaw only). The cloud in RViz therefore lands exactly
+where the comparison put it, and `agreement` describes what you see. Checked
+against the server's function, including its frame-pose decoder: identical to
+1e-15 over 200 random frames. `world_frame.py` holds the algebra and
+`test/test_world_frame.py` tests it.
+
+A frame gets **no** transform unless the result's `pose_source` is `frame` and
+the frame carried a camera. Otherwise the server placed the cloud with its
+stream pose or its configured mount, which this node never saw. TF
+interpolates between the neighbouring estimates instead.
+
+Things to know before relying on it:
+
+- **It is not smoothed, on purpose.** Each estimate carries that frame's
+  odometry error, neck-model error and CUT3R pose drift. Averaging them would
+  place clouds somewhere the comparison did not. The `log_every` line reports
+  the **spread** instead: how far the current estimate is from the first one of
+  this reconstruction session, in metres and degrees. A correct placement keeps
+  it small. A spread that keeps growing is the same fault as an `agreement`
+  near zero, seen from the other side.
+- **It is rigid.** A reconstruction whose metric scale is off (see the
+  lidar/cloud ratio in the same log line) is not rescaled. Its clouds come out
+  the right shape at the wrong size around the camera.
+- **A reconstruction reset moves the frame.** `cloud_map_id` changes are logged
+  as a warning, and the spread's reference restarts with them. Anything
+  accumulated against the previous world frame is void.
+- **It is display and inspection, not navigation.** The per-frame cloud (≤4000
+  points in 5 cm voxels) feeds nothing on the robot. The height decision the
+  costmap needs comes from the server's agreement regions through
+  `mecanumbot_map_agreement` in `mecanumbot_custom_nav2`.
 
 ## Running
 
@@ -201,10 +255,11 @@ metric.
 ## Tests
 
 ```bash
-PYTHONPATH=. python3 -m pytest test/test_cloud.py test/test_geometry.py test/test_camera_pose.py test/test_bridge.py -q
+PYTHONPATH=. python3 -m pytest test/test_cloud.py test/test_geometry.py test/test_camera_pose.py test/test_bridge.py test/test_world_frame.py -q
 ```
 
 All run without ROS, without a server and without a GPU: the wire decoder, the
-rotation helper, the neck camera model and the announcement translation are
+rotation helper, the neck camera model, the world frame's placement and the
+announcement translation are
 plain numpy, and they are where a mistake produces a plausible cloud in the
 wrong place rather than an error.

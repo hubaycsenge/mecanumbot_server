@@ -42,7 +42,7 @@ import time
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import Point, PoseStamped, TransformStamped
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
@@ -58,6 +58,7 @@ from . import bridge
 from . import camera_pose
 from . import cloud as cloud_codec
 from . import sources as ros_sources
+from . import world_frame
 from .geometry import quat_from_matrix
 
 
@@ -84,7 +85,9 @@ class RosImageSource:
         # the newest one than a queued old one.
         self._q = queue.Queue(maxsize=max(1, queue_depth))
         self._stop = threading.Event()
-        #: (monotonic_ns at hand-over, ROS stamp ns) for reply correlation.
+        #: (monotonic_ns at hand-over, ROS stamp ns, pose sent or None) for
+        #: reply correlation.  The pose is kept because the reply's cloud is
+        #: placed in the map with exactly that pose -- see world_frame.py.
         self.handovers = collections.deque(maxlen=256)
         self.dropped = 0
         #: Called with each frame's stamp at hand-over; its answer rides on the
@@ -113,7 +116,7 @@ class RosImageSource:
             # for odometry to catch up with the image, and the hand-over time
             # should be the one closest to the send.
             pose = self.poser(stamp_ns) if self.poser is not None else None
-            self.handovers.append((time.monotonic_ns(), stamp_ns))
+            self.handovers.append((time.monotonic_ns(), stamp_ns, pose))
             # (None, bytes) means "already encoded" -- see the client's CSI
             # source, which does the same with its hardware-encoded frames.
             if self.poser is None:
@@ -166,9 +169,10 @@ class Deep3RClientNode(Node):
                 ("pose_topic", "deep3r/pose"),
                 ("publish_pose", True),
                 # The cloud is in CUT3R's own world frame, anchored on the first
-                # frame of each map_id. It is NOT yet connected to the robot's
-                # TF tree -- see this package's README.
+                # frame of each map_id. publish_world_tf connects it to
+                # map_frame, per frame -- see world_frame.py.
                 ("frame_id", "deep3r_world"),
+                ("publish_world_tf", True),
                 ("advertised_width", 1280),
                 ("advertised_height", 720),
                 ("advertised_fps", 15.0),
@@ -269,8 +273,14 @@ class Deep3RClientNode(Node):
 
         self.map_loop = bool(gp("enable_map_loop").value)
         self._announcements = queue.Queue(maxsize=32)
+        self.world_tf = None
         if self.map_loop:
             self._setup_map_loop(gp, client_module)
+        if bool(gp("publish_world_tf").value) and self.world_tf is None:
+            self.get_logger().warn(
+                f"publish_world_tf is on, but nothing connects '{self.frame_id}' to "
+                "the map: it needs enable_map_loop, send_frame_pose and "
+                "send_camera_pose, and a client that can attach a pose to a frame")
 
         self.client = client_module.RoboCamClient(
             server=str(gp("server").value),
@@ -420,6 +430,23 @@ class Deep3RClientNode(Node):
         )
         self.source.poser = self.frame_poser
 
+        # The world frame's place in the map is the frame's pose composed with
+        # the cloud's, so it exists only when both the base and the camera went
+        # up with the frame.  Without the camera the server placed the cloud
+        # with its configured mount, which this node does not know.
+        if camera is not None and bool(gp("publish_world_tf").value):
+            from tf2_ros import TransformBroadcaster
+
+            self.world_tf = TransformBroadcaster(self)
+            self.world_parent = str(gp("map_frame").value)
+            self._world_reference = None
+            self._world_spread = (0.0, 0.0)
+            self._world_tfs_out = 0
+            self._world_skipped = 0
+            self.get_logger().info(
+                f"broadcasting {self.world_parent} -> {self.frame_id} per cloud, "
+                "from the pose each frame was sent with")
+
     # -- plumbing ------------------------------------------------------------
 
     def _run_client(self):
@@ -472,7 +499,7 @@ class Deep3RClientNode(Node):
         if not cloud_codec.has_cloud(data):
             return
         points, colors = cloud_codec.decode(data["cloud"])
-        stamp = self._stamp_for(result)
+        stamp, frame_pose = self._handover_for(result)
 
         # CUT3R's reconstruction session, NOT the robot's SLAM map -- the two
         # are different identities that invalidate different things, and they
@@ -489,12 +516,19 @@ class Deep3RClientNode(Node):
                     "against the previous one"
                 )
             self._last_cloud_map_id = cloud_map_id
+            if self.world_tf is not None:
+                self._world_reference = None
+
+        pose = data.get("pose_c2w")
+        # Before the cloud, so a listener already holds the transform at the
+        # cloud's stamp when the cloud reaches it.
+        if self.world_tf is not None:
+            self._broadcast_world(result, frame_pose, pose, stamp)
 
         if points.shape[0]:
             self.cloud_pub.publish(self._to_msg(points, colors, stamp))
             self._clouds_out += 1
 
-        pose = data.get("pose_c2w")
         if self.pose_pub is not None and pose:
             self.pose_pub.publish(self._to_pose(np.asarray(pose), stamp))
 
@@ -510,7 +544,50 @@ class Deep3RClientNode(Node):
                 + (f", pose {result.get('pose_source') or 'none'}"
                    f" (frame poses {poser.poses}, tf misses {poser.lookups_failed},"
                    f" neck missing {poser.neck_missing})" if poser is not None else "")
+                + (f", {self.frame_id} in {self.world_parent}: {self._world_tfs_out} sent, "
+                   f"{self._world_skipped} skipped, spread "
+                   f"{self._world_spread[0]:.2f} m / "
+                   f"{math.degrees(self._world_spread[1]):.1f} deg"
+                   if self.world_tf is not None else "")
             )
+
+    def _broadcast_world(self, result, frame_pose, pose_c2w, stamp):
+        """
+        Broadcast ``map -> frame_id`` for the frame this cloud came from.
+
+        Only when the server placed the cloud with the pose this node sent
+        (``pose_source`` is ``frame``): a transform built from anything else
+        would put the cloud somewhere the comparison did not.  Skipped frames
+        leave TF to interpolate between the neighbouring estimates.
+        """
+        matrix = None
+        if result.get("pose_source") == "frame" and pose_c2w:
+            try:
+                matrix = world_frame.map_from_world(frame_pose, pose_c2w)
+            except world_frame.PlacementError as exc:
+                self.get_logger().warn(f"cannot place {self.frame_id}: {exc}")
+        if matrix is None:
+            self._world_skipped += 1
+            return
+
+        if self._world_reference is None:
+            self._world_reference = matrix
+        self._world_spread = world_frame.spread(self._world_reference, matrix)
+
+        (x, y, z), (qx, qy, qz, qw) = world_frame.transform_parts(matrix)
+        tf = TransformStamped()
+        tf.header.stamp = stamp
+        tf.header.frame_id = self.world_parent
+        tf.child_frame_id = self.frame_id
+        tf.transform.translation.x = x
+        tf.transform.translation.y = y
+        tf.transform.translation.z = z
+        tf.transform.rotation.x = qx
+        tf.transform.rotation.y = qy
+        tf.transform.rotation.z = qz
+        tf.transform.rotation.w = qw
+        self.world_tf.sendTransform(tf)
+        self._world_tfs_out += 1
 
     # -- the map loop --------------------------------------------------------
 
@@ -749,23 +826,24 @@ class Deep3RClientNode(Node):
         """Return the robot's SLAM map identity, as the grid source derives it."""
         return getattr(getattr(self, "map_source", None), "map_id", "")
 
-    def _stamp_for(self, result):
+    def _handover_for(self, result):
         """
-        Recover the ROS stamp of the image this reply belongs to.
+        Recover the ROS stamp of the image this reply belongs to, and its pose.
 
-        Falls back to now when the reply carries no ``t_send_ns`` or predates
-        every hand-over this node remembers -- which happens for the first
-        replies after a reconnect, and is better than refusing to publish.
+        Falls back to now, with no pose, when the reply carries no
+        ``t_send_ns`` or predates every hand-over this node remembers -- which
+        happens for the first replies after a reconnect, and is better than
+        refusing to publish.
         """
         sent = result.get("t_send_ns")
         if sent:
             best = None
-            for handed, stamp_ns in self.source.handovers:
+            for handed, stamp_ns, pose in self.source.handovers:
                 if handed <= sent and (best is None or handed > best[0]):
-                    best = (handed, stamp_ns)
+                    best = (handed, stamp_ns, pose)
             if best is not None:
-                return rclpy.time.Time(nanoseconds=best[1]).to_msg()
-        return self.get_clock().now().to_msg()
+                return rclpy.time.Time(nanoseconds=best[1]).to_msg(), best[2]
+        return self.get_clock().now().to_msg(), None
 
     def _to_msg(self, points, colors, stamp):
         fields = [

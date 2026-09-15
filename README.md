@@ -18,7 +18,7 @@ on the cluster; this repository is only the robot's end of the conversation.
 
 | Executable | Package | ROS node name | Interfaces |
 | --- | --- | --- | --- |
-| `mecanumbot_deep3r_client_node` | `mecanumbot_deep3r` | `mecanumbot_deep3r_client_node` | Subscribes `camera/image_raw/compressed`; publishes `deep3r/points` (`PointCloud2`), `deep3r/pose` (`PoseStamped`). |
+| `mecanumbot_deep3r_client_node` | `mecanumbot_deep3r` | `mecanumbot_deep3r_client_node` | Subscribes `camera/image_raw/compressed`; publishes `deep3r/points` (`PointCloud2`), `deep3r/pose` (`PoseStamped`), and the `map -> deep3r_world` transform. |
 
 No nodes are implemented at the repository root — it only groups the package.
 
@@ -86,10 +86,10 @@ running.
 
 ```bash
 cd mecanumbot_deep3r
-PYTHONPATH=. python3 -m pytest test/test_cloud.py test/test_geometry.py -q
+PYTHONPATH=. python3 -m pytest test/test_cloud.py test/test_geometry.py test/test_camera_pose.py test/test_bridge.py test/test_world_frame.py -q
 ```
 
-Both run without ROS, without a server and without a GPU.
+All run without ROS, without a server and without a GPU.
 
 ## Repository structure
 
@@ -99,4 +99,4 @@ Both run without ROS, without a server and without a GPU.
 | `LICENSE` | Apache-2.0. |
 
 See `mecanumbot_deep3r/README.md` for the full parameter table, the timestamp
-correlation, and why the returned cloud is not yet connected to TF.
+correlation, and how the returned cloud's world frame is placed in the map.

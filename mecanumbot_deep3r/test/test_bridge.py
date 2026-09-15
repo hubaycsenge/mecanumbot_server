@@ -280,6 +280,19 @@ class TestTheClientVersionGuard:
         assert "scp" in message                  # says how to fix it
         assert "enable_map_loop:=false" in message   # and how to proceed now
 
+    def test_a_symlinked_old_client_points_at_its_checkout(self, tmp_path):
+        """A link is only as new as the repository it points into."""
+        checkout = tmp_path / "RoboCamStreamProcessing" / "link"
+        checkout.mkdir(parents=True)
+        (checkout / "robocam_client.py").write_text("")
+        link = tmp_path / "robocam_client.py"
+        link.symlink_to(checkout / "robocam_client.py")
+        with pytest.raises(RuntimeError) as exc:
+            bridge.check_client_api(self.a_module(), str(link))
+        message = str(exc.value)
+        assert f"git -C {checkout} pull" in message
+        assert "scp" not in message
+
     def test_a_partially_updated_client_is_also_refused(self):
         """Half the map loop is not a working map loop."""
         mod = self.a_module(map_every_s=None, on_map_update=None)

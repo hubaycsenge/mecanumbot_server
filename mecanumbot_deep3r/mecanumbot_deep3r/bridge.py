@@ -327,12 +327,29 @@ def check_client_api(module, path):
     missing = [k for k in REQUIRED_CLIENT_KWARGS if k not in params]
     if not missing:
         return
-    raise RuntimeError(
+    import os
+
+    header = (
         f"the robocam_client.py at {path} is older than this node: it does not "
         f"accept {', '.join(missing)}.\n"
-        "That file is deployed by scp, not by git, so a `git pull` of this "
-        "workspace updates the node and leaves the client behind. Redeploy it:\n"
-        "  scp <host>:.../RoboCamStreamProcessing/link/robocam_client.py ~/\n"
-        "Or run without the map loop until you do:\n"
+    )
+    real = os.path.realpath(path)
+    if real != os.path.abspath(path):
+        # A symlink into a checkout is only as new as that checkout: linking
+        # the file does not update it, pulling the repository it lives in does.
+        fix = (
+            f"It is a link to {real}, so that checkout is behind. Update it:\n"
+            f"  git -C {os.path.dirname(real)} pull\n"
+        )
+    else:
+        fix = (
+            "That file is deployed by scp, not by git, so a `git pull` of this "
+            "workspace updates the node and leaves the client behind. "
+            "Redeploy it:\n"
+            "  scp <host>:.../RoboCamStreamProcessing/link/robocam_client.py ~/\n"
+        )
+    raise RuntimeError(
+        header + fix
+        + "Or run without the map loop until you do:\n"
         "  ros2 launch mecanumbot_deep3r deep3r.launch.py enable_map_loop:=false"
     )
