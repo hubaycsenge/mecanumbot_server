@@ -65,7 +65,7 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | `camera.pivot_x` / `_z`, `camera.lever_x` / `_z` | `0.1063` / `0.1679`, `0.022` / `0.038` | The neck pivot and the pivot-to-lens lever, in `base_link`. |
 | `camera.level_ticks` | `600.0` | Servo ticks of the trees' `neck_level_pos`. |
 | `camera.rad_per_tick` | `0.005061` | Tilt per servo tick. |
-| `camera.pitch_at_level_deg` | `0.0` | **Unmeasured.** Lens tilt at `level_ticks`, positive up. |
+| `camera.pitch_at_level_deg` | `0.0` (`deep3r.yaml`: `4.7`) | Lens tilt at `level_ticks`, positive up. **Measured** 2026-09-15 with a ball on the floor; the camera is level at ~584 ticks. |
 | `enable_map_loop` | `true` | The map loop: pose, grid and scan up; verdict, target and pose hint back. Also a launch argument. See *Running*. |
 | `map_topic` / `scan_topic` | `/map` / `/mecanumbot/scan` | The grid and the scan sent up. The LD08 driver is namespaced; nothing publishes `/scan`. |
 | `map_frame` / `base_frame` / `pose_rate_hz` | `map` / `mecanumbot/base_link` / `10.0` | The robot's map pose, read from TF (T1 runs under slam_toolbox, which publishes no `/amcl_pose`). |
@@ -118,8 +118,9 @@ The model is still used instead of TF, for three reasons:
 
 - **The pose has to be the neck at the image's stamp.** The model reads the
   neck reading closest to that stamp directly.
-- **`pitch_at_level_deg` has nowhere to go in the URDF.** TF would drop the one
-  calibration this placement has.
+- **`pitch_at_level_deg` has nowhere to go in the URDF**, so it lives in
+  `mecanumbot_sensorproc_node` instead, as `NECK_PITCH_AT_LEVEL` added to
+  `head_joint`.
 - **The simulator still uses the old tick convention.** `mecanumbot_sim`'s
   `accessory_ticks_to_angle` is `2.618 - ticks · rad_per_tick`: the opposite
   sign and a different zero. In simulation, `head_joint` in TF does not mean
@@ -127,15 +128,17 @@ The model is still used instead of TF, for three reasons:
 
 Since the two now agree, TF is the cross-check. If RViz shows the cloud tilted
 against `camera_rgb_optical_frame`, one of them has drifted from the other.
-`camera_pose.py` and `mecanumbot_sensorproc_node.NECK_LEVEL_TICKS` have to
-change together, as the comment there says.
+`camera_pose.py`'s numbers and `mecanumbot_sensorproc_node`'s `NECK_LEVEL_TICKS` /
+`NECK_PITCH_AT_LEVEL` have to change together, as the comment there says.
 
 Two assumptions to know about:
 
-- **`pitch_at_level_deg` is unmeasured.** Nothing establishes that the trees'
-  "neutral driving gaze" (`neck_level_pos` 6.0) is optically level. A cloud
-  that is consistently tilted, or a `pose_hint` that keeps offering the same
-  correction, points here.
+- **`pitch_at_level_deg` is +4.7°, measured on 2026-09-15** (a ball on the floor,
+  the neck held still at 500–600 ticks; see `mecanumbot_sensorprocess_smart`'s
+  README). The trees' "neutral driving gaze" (`neck_level_pos` 6.0) looks 4.7°
+  up. It was 0 before, so clouds from earlier runs were placed tilted by that
+  much. A cloud that is still consistently tilted, or a `pose_hint` that keeps
+  offering the same correction, points here.
 - **The neck position is the goal, not the head.** The firmware echoes the last
   command back as `opencr_state.pos_n` and never reads the AX-12A's present
   position, so during a sweep the model is ahead of the head by the servo's
