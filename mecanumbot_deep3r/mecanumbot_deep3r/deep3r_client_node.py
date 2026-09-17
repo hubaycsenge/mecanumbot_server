@@ -582,9 +582,13 @@ class Deep3RClientNode(Node):
                 f"in {self._frames_in} dropped {self.source.dropped}"
                 + (f", lidar/cloud ratio {check['ratio']}" if check.get("ratio")
                    else "")
-                + (f", the source frame is GREY (chroma {colour['chroma']}), "
-                   "so the cloud is grey because the picture is"
-                   if colour.get("grey") else "")
+                + (f", source frame {colour.get('brightness')}/255 bright, "
+                   f"chroma {colour.get('chroma')}"
+                   + (" -- NEARLY BLACK, so the points are too"
+                      if colour.get("dark") else
+                      " -- GREY, so the cloud is grey because the picture is"
+                      if colour.get("grey") else "")
+                   if colour else "")
                 + (f", height {compared.get('below_slice', 0)} below / "
                    f"{compared.get('in_slice', 0)} in / "
                    f"{compared.get('above_slice', 0)} above the "
