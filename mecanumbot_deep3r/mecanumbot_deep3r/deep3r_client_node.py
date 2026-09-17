@@ -559,21 +559,36 @@ class Deep3RClientNode(Node):
             if colors is None and not self._warned_colourless:
                 self._warned_colourless = True
                 self.get_logger().warn(
-                    "the server is sending no per-point colour, so the cloud "
-                    "publishes as xyz only; set `colors: true` in the server's "
-                    "processor options if you wanted it")
+                    "the cloud publishes as xyz only: "
+                    + (cloud_codec.colour_note(data["cloud"]) or "reason unknown")
+                    + ". RViz then colours it by intensity or by axis, which "
+                    "looks like a greyscale cloud rather than a colourless one")
 
         if self.pose_pub is not None and pose:
             self.pose_pub.publish(self._to_pose(np.asarray(pose), stamp))
 
         if self.log_every and self._clouds_out % self.log_every == 1:
             check = data.get("scale_check") or {}
+            # The comparison already counts what falls outside its height
+            # slice; only the robot never said so. A cloud that is mostly
+            # `below` is one whose placement is still wrong, however well the
+            # walls happen to line up in RViz.
+            compared = data.get("compare") or {}
+            colour = data.get("colour") or {}
             poser = getattr(self, "frame_poser", None)
             self.get_logger().info(
                 f"cloud map {cloud_map_id} frame {data.get('frames_in_state')}: "
                 f"{points.shape[0]} pts, infer {data.get('infer_ms')} ms, "
                 f"in {self._frames_in} dropped {self.source.dropped}"
                 + (f", lidar/cloud ratio {check['ratio']}" if check.get("ratio")
+                   else "")
+                + (f", the source frame is GREY (chroma {colour['chroma']}), "
+                   "so the cloud is grey because the picture is"
+                   if colour.get("grey") else "")
+                + (f", height {compared.get('below_slice', 0)} below / "
+                   f"{compared.get('in_slice', 0)} in / "
+                   f"{compared.get('above_slice', 0)} above the "
+                   "0.05-1.6 m slice" if compared.get("in_slice") is not None
                    else "")
                 + (f", pose {result.get('pose_source') or 'none'}"
                    f" (frame poses {poser.poses}, tf misses {poser.lookups_failed},"

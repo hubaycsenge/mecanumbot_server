@@ -158,6 +158,44 @@ def layout(cloud, have_colors):
     return fields, max(f["offset"] for f in fields) + 4
 
 
+def colour_note(cloud):
+    """
+    Say why a cloud came back without usable colours, or ``None`` if it did.
+
+    :func:`decode` drops a colour array of the wrong length rather than losing
+    the whole cloud over it, which is the right trade and was also completely
+    silent -- the cloud simply arrived grey, with nothing anywhere saying so.
+    A greyscale cloud and a colourless one look identical in RViz (it falls
+    back to colouring by intensity or by axis), so the difference between
+    "the server sent no colour", "the server sent the wrong amount of colour"
+    and "the camera is producing a grey image" could not be told apart from
+    the robot at all.
+
+    This is what makes the second one say its own name.  The third is not
+    visible from here: colours that arrive intact and happen to have
+    ``R == G == B`` are a grey *picture*, and the place to look for that is
+    the camera topic or the server's snapshots.
+    """
+    if not isinstance(cloud, dict):
+        return "the reply carried no cloud block"
+    n = int(cloud.get("n_points", 0))
+    if n == 0:
+        return None
+    packed = cloud.get("rgb_u8") or ""
+    if not packed:
+        return ("the server sent no colour at all (rgb_u8 empty) -- check "
+                "`colors` in its processor options")
+    try:
+        size = len(base64.b64decode(packed))
+    except (ValueError, TypeError) as exc:
+        return f"the colour array is not decodable base64: {exc}"
+    if size != n * 3:
+        return (f"the server sent {size} colour bytes for {n} points, which "
+                f"is not {n} x 3; the colours were dropped and the geometry "
+                "kept")
+    return None
+
+
 def to_xyzrgb(points, colors):
     """
     Pack into the interleaved xyz+rgb buffer PointCloud2 wants.

@@ -188,3 +188,34 @@ class TestLayout:
     def test_an_unusable_declaration_is_refused_not_guessed(self):
         with pytest.raises(C.CloudFormatError):
             C.layout({"pc2": {"fields": [{"name": "x"}]}}, True)
+
+
+class TestColourNote:
+    """
+    Why a cloud arrived grey, in words, instead of silently.
+
+    A dropped colour array and a genuinely grey picture look identical in
+    RViz, so the one the robot *can* tell apart has to say so itself.
+    """
+
+    def test_a_good_cloud_has_nothing_to_say(self):
+        points = np.array([[1.0, 2.0, 3.0]])
+        colors = np.array([[10, 20, 30]], np.uint8)
+        assert C.colour_note(encode(points, colors)) is None
+
+    def test_an_empty_cloud_has_nothing_to_say(self):
+        assert C.colour_note({"n_points": 0}) is None
+
+    def test_no_colour_at_all_names_the_server_option(self):
+        note = C.colour_note(encode(np.array([[1.0, 2.0, 3.0]])))
+        assert "colors" in note
+
+    def test_the_wrong_amount_of_colour_gives_both_counts(self):
+        cloud = encode(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+                       np.array([[1, 2, 3], [4, 5, 6]], np.uint8))
+        cloud["n_points"] = 5                    # as if the arrays disagreed
+        note = C.colour_note(cloud)
+        assert "6 colour bytes" in note and "5 points" in note
+
+    def test_undecodable_colour_is_reported_not_raised(self):
+        assert "base64" in C.colour_note({"n_points": 2, "rgb_u8": "!!!not base64!!!"})
