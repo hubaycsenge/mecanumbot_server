@@ -595,8 +595,18 @@ class Deep3RClientNode(Node):
 
     # -- the map loop --------------------------------------------------------
 
-    def _queue_announcement(self, header):
-        """Take one announcement on the client's thread; do no ROS work here."""
+    def _queue_announcement(self, header, cells=None):
+        """
+        Take one announcement on the client's thread; do no ROS work here.
+
+        ``cells`` is the second argument the client hands ``on_map_update``
+        only -- the decoded patch -- and it is accepted and dropped rather than
+        refused: `_dispatch` deliberately does not merge a patch (see there),
+        and a callback that could not be called at all merely turned every
+        `map_update` into a `TypeError` inside the client's dispatch, logged as
+        "on_map_update callback raised" and swallowed there.  The other three
+        announcements pass one argument.
+        """
         try:
             self._announcements.put_nowait(header)
         except queue.Full:
