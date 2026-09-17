@@ -318,6 +318,11 @@ class TopicMapSource:
         self._identity = bridge.MapIdentity()
         self.maps_read = 0
         self.map_id = ""
+        #: (resolution, origin_x, origin_y, width, height, frame) of the last
+        #: grid seen, for rendering the server's obstacle cells against what
+        #: ``/map`` looks like *now*. slam_toolbox changes all of it as the map
+        #: grows, which is why nothing downstream may cache it.
+        self.geometry = None
 
     def info(self):
         return {"source": "ros2", "topic": "/map"}
@@ -338,6 +343,9 @@ class TopicMapSource:
                 f"SLAM map restarted: map_id {previous!r} -> {self.map_id!r}; "
                 "verdicts and sightings for the old map are dropped from here on")
         self.maps_read += 1
+        self.geometry = (float(info.resolution), float(info.origin.position.x),
+                         float(info.origin.position.y), int(info.width),
+                         int(info.height), msg.header.frame_id or "map")
         self._queue.put(self._client.MapReading(
             cells=cells,
             resolution=float(info.resolution),

@@ -112,6 +112,79 @@ def test_to_xyzrgb_lays_points_out_for_pointcloud2():
     assert packed[0, 3:4].view(np.uint32)[0] == (255 << 16) | (128 << 8) | 64
 
 
-def test_to_xyzrgb_without_colours_leaves_the_channel_zero():
+def test_to_xyzrgb_without_colours_omits_the_channel_entirely():
+    """
+    It used to leave a zeroed fourth column, which is solid black.
+
+    An rgb channel of zeros is not "no colour", it is the colour black, and
+    RViz colouring by RGB8 has nothing else to fall back to.  Three columns
+    with no rgb field lets it pick a transformer that says something.
+    """
     packed = C.to_xyzrgb(np.array([[1.0, 2.0, 3.0]], np.float32), None)
-    assert packed[0, 3] == 0.0
+    assert packed.shape == (1, 3)
+    assert packed[0].tolist() == [1.0, 2.0, 3.0]
+
+
+class TestLayout:
+    """
+    What the ``PointCloud2`` says about itself, and that the bytes agree.
+
+    The server ships a ``pc2`` block so this end does not keep its own copy of
+    the layout.  It kept one anyway until 2026-09-17, and the cost was a
+    colourless cloud published as four fields with a zeroed ``rgb`` -- solid
+    black, with no other channel for RViz to colour by.
+    """
+
+    def with_colors(self):
+        return {"pc2": {"point_step": 16, "fields": [
+            {"name": "x", "offset": 0, "datatype": 7, "count": 1},
+            {"name": "y", "offset": 4, "datatype": 7, "count": 1},
+            {"name": "z", "offset": 8, "datatype": 7, "count": 1},
+            {"name": "rgb", "offset": 12, "datatype": 6, "count": 1},
+        ]}}
+
+    def without_colors(self):
+        block = self.with_colors()
+        block["pc2"]["fields"] = block["pc2"]["fields"][:3]
+        block["pc2"]["point_step"] = 12
+        return block
+
+    def test_a_coloured_cloud_carries_the_rgb_field(self):
+        fields, step = C.layout(self.with_colors(), True)
+        assert [f["name"] for f in fields] == ["x", "y", "z", "rgb"]
+        assert step == 16
+
+    def test_the_rgb_field_is_published_as_float32(self):
+        """The one thing not taken from the server: pcl::PointXYZRGB wants it."""
+        fields, _ = C.layout(self.with_colors(), True)
+        assert fields[-1]["datatype"] == C.FLOAT32
+
+    def test_a_colourless_cloud_drops_the_field_rather_than_blacking_it(self):
+        fields, step = C.layout(self.without_colors(), False)
+        assert [f["name"] for f in fields] == ["x", "y", "z"]
+        assert step == 12
+
+    def test_the_bytes_decide_when_the_declaration_disagrees(self):
+        """A dropped colour array must not leave an rgb field over zeros."""
+        fields, step = C.layout(self.with_colors(), False)
+        assert [f["name"] for f in fields] == ["x", "y", "z"]
+        assert step == 12
+
+    def test_an_undeclared_layout_falls_back(self):
+        """An older server sends no pc2 block; the cloud is still publishable."""
+        fields, step = C.layout({}, True)
+        assert [f["name"] for f in fields] == ["x", "y", "z", "rgb"]
+        assert step == 16
+
+    def test_the_step_matches_the_bytes_to_xyzrgb_produces(self):
+        """The pair that has to hold, or every point is strided off its own end."""
+        points = np.zeros((7, 3), np.float32)
+        for colors in (np.zeros((7, 3), np.uint8), None):
+            declared = self.with_colors() if colors is not None else self.without_colors()
+            _, step = C.layout(declared, colors is not None)
+            packed = C.to_xyzrgb(points, colors)
+            assert len(packed.tobytes()) == step * 7
+
+    def test_an_unusable_declaration_is_refused_not_guessed(self):
+        with pytest.raises(C.CloudFormatError):
+            C.layout({"pc2": {"fields": [{"name": "x"}]}}, True)

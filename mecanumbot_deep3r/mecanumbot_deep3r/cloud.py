@@ -82,6 +82,82 @@ def decode(cloud):
     return points, colors
 
 
+#: ``sensor_msgs/PointField`` datatype numbers, so this module can talk about a
+#: layout without importing ROS.
+FLOAT32 = 7
+UINT32 = 6
+
+#: The layout to publish when the server declares none -- an older server, or a
+#: reply whose ``cloud`` block predates ``pc2``.
+_FALLBACK_FIELDS = (
+    {"name": "x", "offset": 0, "datatype": FLOAT32, "count": 1},
+    {"name": "y", "offset": 4, "datatype": FLOAT32, "count": 1},
+    {"name": "z", "offset": 8, "datatype": FLOAT32, "count": 1},
+)
+_RGB_FIELD = {"name": "rgb", "offset": 12, "datatype": FLOAT32, "count": 1}
+
+
+def layout(cloud, have_colors):
+    """
+    Return ``(fields, point_step)`` for one cloud's ``PointCloud2``.
+
+    Taken from the server's own ``pc2`` block where it sent one.  It ships that
+    block precisely so this end does not keep a second copy of the layout --
+    "exactly the kind of duplicated constant that survives a change at this end
+    and produces a cloud read as garbage at the other", as ``_pack_cloud`` puts
+    it -- and until 2026-09-17 this end kept one anyway: four fields and a
+    ``point_step`` of 16, whatever the server said.
+
+    What that cost was a **colourless cloud published as a black one**.  A
+    server configured with ``colors: false`` sends three fields and a
+    ``point_step`` of 12; the hardcoded layout appended an ``rgb`` field over
+    the zeros that :func:`to_xyzrgb` leaves there, so every point arrived
+    solid black and RViz had no other channel to fall back to.  ``have_colors``
+    is therefore what decides whether the field exists, not what the server
+    declared: the two disagree exactly when a colour array was dropped for
+    being the wrong length, and the bytes win.
+
+    The one thing deliberately **not** taken from the server is the ``rgb``
+    field's datatype.  The server declares ``UINT32``; this publishes
+    ``FLOAT32``, which is the same four bytes read the same way and is the
+    convention ``pcl::PointXYZRGB`` requires -- so a cloud that reaches a Nav2
+    costmap layer through PCL is read rather than rejected.  RViz accepts
+    either.
+    """
+    fields = None
+    declared = cloud.get("pc2") if isinstance(cloud, dict) else None
+    if isinstance(declared, dict):
+        raw = declared.get("fields")
+        if isinstance(raw, (list, tuple)) and raw:
+            try:
+                fields = [
+                    {"name": str(f["name"]), "offset": int(f["offset"]),
+                     "datatype": int(f["datatype"]), "count": int(f.get("count", 1))}
+                    for f in raw
+                ]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise CloudFormatError(f"unusable pc2.fields: {exc}") from exc
+
+    if fields is None:
+        fields = [dict(f) for f in _FALLBACK_FIELDS]
+
+    # The bytes decide, not the declaration.  Drop a colour field we have no
+    # colours for rather than publish the zeros as black; add one the server
+    # forgot to declare but sent the bytes for.
+    fields = [f for f in fields if f["name"] != "rgb"]
+    if have_colors:
+        fields.append(dict(_RGB_FIELD, offset=max(f["offset"] + 4 for f in fields)))
+    for field in fields:
+        if field["name"] == "rgb":
+            field["datatype"] = FLOAT32
+
+    # Derived, never taken from ``pc2.point_step``: :func:`to_xyzrgb` packs
+    # exactly these fields and nothing else, so a declared step that disagreed
+    # -- 16 from a server that sent colours, for a reply whose colours were
+    # dropped -- would stride the buffer past the end of every point.
+    return fields, max(f["offset"] for f in fields) + 4
+
+
 def to_xyzrgb(points, colors):
     """
     Pack into the interleaved xyz+rgb buffer PointCloud2 wants.
@@ -89,13 +165,20 @@ def to_xyzrgb(points, colors):
     RViz and the Nav2 costmaps read ``rgb`` as a float32 whose bits are
     ``0x00RRGGBB``; that is a convention rather than anything numeric, hence
     the view rather than a cast.
+
+    Returns (N, 3) when there are no colours, which is what :func:`layout`
+    declares for that case.  The two are a pair: the fields and the bytes have
+    to agree about how wide a point is.
     """
     n = points.shape[0]
+    if colors is None:
+        # Three columns, not four with a zeroed fourth: an all-zero ``rgb``
+        # column is solid black, and :func:`layout` drops the field to match.
+        return np.ascontiguousarray(points, dtype=np.float32).reshape(n, 3)
     out = np.zeros((n, 4), dtype=np.float32)
     out[:, :3] = points
-    if colors is not None:
-        packed = (colors[:, 0].astype(np.uint32) << 16
-                  | colors[:, 1].astype(np.uint32) << 8
-                  | colors[:, 2].astype(np.uint32))
-        out[:, 3] = packed.view(np.float32)
+    packed = (colors[:, 0].astype(np.uint32) << 16
+              | colors[:, 1].astype(np.uint32) << 8
+              | colors[:, 2].astype(np.uint32))
+    out[:, 3] = packed.view(np.float32)
     return out

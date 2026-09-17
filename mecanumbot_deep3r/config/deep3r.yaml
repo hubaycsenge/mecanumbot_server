@@ -122,6 +122,31 @@ mecanumbot_deep3r_client_node:
     # frontier explorer's T1 CLOUD exit criterion and the keepout mask are both
     # built from; without it T1 can never finish.
     agreement_topic: /mecanumbot/deep3r/map_agreement
+
+    # The server's other arrow back at the robot. `map_update` is a patch of
+    # cells its reconstruction says are occupied and the LiDAR's one horizontal
+    # plane never saw -- a table top, a low shelf, the lip of a step. The
+    # client decoded every one of them and this node dropped them until
+    # 2026-09-17; they now accumulate (in metres, so a re-rasterised /map
+    # cannot move them) and publish here, latched.
+    #
+    # NOT merged into /map. slam_toolbox owns that grid and builds it from its
+    # scan graph; cells from a monocular reconstruction injected into it would
+    # stop it being a scan product without slam_toolbox ever knowing. This is
+    # navigation's copy, for a nav2 costmap layer to read alongside the map.
+    # Nothing here touches SLAM's grid or its pose -- the pose_hint is still
+    # logged and never applied.
+    #
+    # It is a second, finer-grained route to the costmap than
+    # mecanumbot_map_agreement's keepout mask, and they are meant to differ:
+    # the mask comes from the verdict's regions plus a height decision, this is
+    # the cells the comparison actually disagreed on.
+    cloud_obstacle_topic: /mecanumbot/deep3r/cloud_obstacles
+    publish_cloud_obstacles: true
+    # A bound on a long T1. At 5 cm this is 250 m^2 of solid obstacle, far more
+    # than a session should produce, so hitting it means the placement is wrong
+    # rather than the room being full.
+    max_obstacle_cells: 100000
     # The seek tree's two inputs, and they are two on purpose: `memory` (where
     # the object was) drives the goto branch, `live` (where it is now) drives
     # the monitor branch. Merging them would collapse the distinction the whole

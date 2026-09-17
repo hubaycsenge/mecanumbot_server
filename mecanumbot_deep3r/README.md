@@ -37,6 +37,7 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | `deep3r/pose` | `geometry_msgs/msg/PoseStamped` | CUT3R's camera pose for that frame, same frame as the cloud. Disable with `publish_pose`. |
 | `/tf` | `map -> deep3r_world` | Where CUT3R's world frame sits in the map, per cloud. Disable with `publish_world_tf`. |
 | `/mecanumbot/deep3r/map_agreement` | `mecanumbot_msgs/msg/MapCloudAgreement` | The server's 2D-map/cloud comparison. Map loop only. |
+| `/mecanumbot/deep3r/cloud_obstacles` | `nav_msgs/msg/OccupancyGrid` | Cells the cloud says are occupied and the LiDAR plane never saw, accumulated and latched. **Not** merged into `/map`. Map loop only; disable with `publish_cloud_obstacles`. |
 | `/mecanumbot/seek/target` | `vision_msgs/msg/Detection3DArray` | Where the server remembers the requested object (`memory`). Map loop only. |
 | `/mecanumbot/seek/detections` | `vision_msgs/msg/Detection3DArray` | Where the server sees it now (`live`). Map loop only. |
 
@@ -71,6 +72,8 @@ package imports torch, and the node runs on the Orin with numpy and pyzmq.
 | `map_frame` / `base_frame` / `pose_rate_hz` | `map` / `mecanumbot/base_link` / `10.0` | The robot's map pose, read from TF (T1 runs under slam_toolbox, which publishes no `/amcl_pose`). |
 | `map_every_s` | `5.0` | Seconds between grid uploads. |
 | `agreement_topic` | `/mecanumbot/deep3r/map_agreement` | The verdict output. |
+| `cloud_obstacle_topic` / `publish_cloud_obstacles` | `/mecanumbot/deep3r/cloud_obstacles` / `true` | The `map_update` output, for a nav2 costmap layer. |
+| `max_obstacle_cells` | `100000` | Bound on the accumulator. At 5 cm that is 250 m², so reaching it means the placement is wrong, not the room full. |
 | `seek_target_topic` / `seek_detections_topic` | `/mecanumbot/seek/target` / `/mecanumbot/seek/detections` | The seek tree's two inputs, kept apart on purpose. |
 | `finished_topic` / `request_topic` | `/mecanumbot/exploration/finished` / `/mecanumbot/seek/request` | The T1 latch that sends the server a phase change, and the free-text seek request. |
 | `hint_min_confidence` / `hint_min_inliers` | `0.5` / `40` | Only gate whether a `pose_hint` is logged; nothing applies one. |
@@ -230,6 +233,29 @@ Things to know before relying on it:
   points in 5 cm voxels) feeds nothing on the robot. The height decision the
   costmap needs comes from the server's agreement regions through
   `mecanumbot_map_agreement_node` in `mecanumbot_custom_nav2`.
+
+## What the server sends back, and what acts on it
+
+Four announcements arrive unasked. Where each one ends up is the thing to be
+clear about, because **none of them reaches SLAM**:
+
+| Announcement | Where it goes |
+| --- | --- |
+| `agreement` | `deep3r/map_agreement` → `mecanumbot_map_agreement_node` → a nav2 **keepout mask** from the verdict's *regions* plus a height decision, and T1's `CLOUD` exit criterion. |
+| `map_update` | `deep3r/cloud_obstacles` → a nav2 **costmap layer**, from the *cells* the comparison disagreed on. Finer-grained than the mask, and deliberately a separate topic. |
+| `pose_hint` | Logged and **never applied**. |
+| `found` | `seek/target` (a memory) or `seek/detections` (a live sighting). |
+
+`slam_toolbox` takes nothing from any of them. It owns `/map` and `map -> odom`,
+builds the grid from its own scan graph, and has loop closures the server cannot
+see; a cell injected from a monocular reconstruction would stop the grid being a
+scan product without slam_toolbox ever knowing, and a pose correction applied
+here would be a second thing estimating one transform. So the server's findings
+reach **navigation**, and the map stays the robot's own.
+
+The two costmap routes are meant to differ rather than agree, and neither is
+wired into the study parameter files — `mecanumbot_custom_nav2`'s T1/T2 files
+carry the filters, as `mecanumbot_seek_nav2.yaml` does for T2.
 
 ## Running
 

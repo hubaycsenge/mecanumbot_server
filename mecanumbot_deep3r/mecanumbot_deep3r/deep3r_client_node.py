@@ -57,6 +57,7 @@ from mecanumbot_msgs.msg import MapCloudAgreement, OpenCRState
 from . import bridge
 from . import camera_pose
 from . import cloud as cloud_codec
+from . import obstacles as cloud_obstacles
 from . import sources as ros_sources
 from . import world_frame
 from .geometry import quat_from_matrix
@@ -216,6 +217,14 @@ class Deep3RClientNode(Node):
                 ("map_every_s", 5.0),
                 # What the robot publishes from what comes back.
                 ("agreement_topic", "/mecanumbot/deep3r/map_agreement"),
+                # The server's OTHER arrow back at the robot: the cells its
+                # reconstruction says are occupied and the scanner's one
+                # horizontal plane never saw. Published for a nav2 costmap
+                # layer to read alongside /map -- never merged into /map, which
+                # slam_toolbox owns and builds from scans. See obstacles.py.
+                ("cloud_obstacle_topic", "/mecanumbot/deep3r/cloud_obstacles"),
+                ("publish_cloud_obstacles", True),
+                ("max_obstacle_cells", 100000),
                 ("seek_target_topic", "/mecanumbot/seek/target"),
                 ("seek_detections_topic", "/mecanumbot/seek/detections"),
                 # T1 -> T2 handover.  The explorer latches this when its exit
@@ -266,6 +275,10 @@ class Deep3RClientNode(Node):
         )
         self.cloud_pub = self.create_publisher(
             PointCloud2, str(gp("cloud_topic").value), 1)
+        self.obstacles = None
+        self.obstacle_pub = None
+        self._obstacle_updates = 0
+        self._warned_obstacle_cap = False
         self.pose_pub = (
             self.create_publisher(PoseStamped, str(gp("pose_topic").value), 10)
             if self.publish_pose else None
@@ -303,6 +316,7 @@ class Deep3RClientNode(Node):
         )
         self._frames_in = 0
         self._clouds_out = 0
+        self._warned_colourless = False
         self._last_cloud_map_id = None
         self._thread = threading.Thread(target=self._run_client, daemon=True)
         self._thread.start()
@@ -369,6 +383,15 @@ class Deep3RClientNode(Node):
             Bool, str(gp("finished_topic").value), self._on_finished, latched)
         self.create_subscription(
             String, str(gp("request_topic").value), self._on_request, 10)
+
+        if bool(gp("publish_cloud_obstacles").value):
+            self.obstacles = cloud_obstacles.CloudObstacles(
+                max_cells=int(gp("max_obstacle_cells").value))
+            # Latched, like the map itself: a costmap layer that starts after
+            # the first patch -- and nav2 is restarted by hand after a T1 pass
+            # -- must still get what the server has already found.
+            self.obstacle_pub = self.create_publisher(
+                OccupancyGrid, str(gp("cloud_obstacle_topic").value), latched)
 
         self.agreement_pub = self.create_publisher(
             MapCloudAgreement, str(gp("agreement_topic").value), 10)
@@ -530,8 +553,15 @@ class Deep3RClientNode(Node):
             self._broadcast_world(result, frame_pose, pose, stamp)
 
         if points.shape[0]:
-            self.cloud_pub.publish(self._to_msg(points, colors, stamp))
+            self.cloud_pub.publish(
+                self._to_msg(points, colors, data["cloud"], stamp))
             self._clouds_out += 1
+            if colors is None and not self._warned_colourless:
+                self._warned_colourless = True
+                self.get_logger().warn(
+                    "the server is sending no per-point colour, so the cloud "
+                    "publishes as xyz only; set `colors: true` in the server's "
+                    "processor options if you wanted it")
 
         if self.pose_pub is not None and pose:
             self.pose_pub.publish(self._to_pose(np.asarray(pose), stamp))
@@ -608,7 +638,7 @@ class Deep3RClientNode(Node):
         announcements pass one argument.
         """
         try:
-            self._announcements.put_nowait(header)
+            self._announcements.put_nowait((header, cells))
         except queue.Full:
             # Verdicts are periodic and the next one supersedes this one; a
             # `found` is not, so it is worth saying that one was lost.
@@ -618,11 +648,11 @@ class Deep3RClientNode(Node):
     def _drain_announcements(self):
         while True:
             try:
-                header = self._announcements.get_nowait()
+                header, cells = self._announcements.get_nowait()
             except queue.Empty:
                 return
             try:
-                self._dispatch(header)
+                self._dispatch(header, cells)
             except bridge.BridgeError as exc:
                 # Malformed rather than merely unwelcome.  Logged and dropped:
                 # this is the server and the robot disagreeing about the
@@ -631,7 +661,7 @@ class Deep3RClientNode(Node):
                 self.get_logger().error(
                     f"unusable {header.get('type', '?')} announcement: {exc}")
 
-    def _dispatch(self, header):
+    def _dispatch(self, header, cells=None):
         kind = header.get("type")
         if kind == "agreement":
             self._on_agreement(header)
@@ -640,17 +670,78 @@ class Deep3RClientNode(Node):
         elif kind == "pose_hint":
             self._on_pose_hint(header)
         elif kind == "map_update":
-            # Deliberately not applied here.  The patch belongs in the costmap,
-            # and `mecanumbot_map_agreement` is what owns that -- it rebuilds a
-            # keepout mask from the verdict's regions, with a height decision
-            # this node has no business making.  Merging the cells here as well
-            # would put the same obstacles into the map twice, by two routes
-            # with different lifetimes.
-            self.get_logger().debug(
-                f"map_update: {header.get('cells_changed', 0)} cells "
-                f"(applied via the agreement verdict, not merged here)")
+            self._on_map_update(header, cells)
         else:
             self.get_logger().warn(f"unknown announcement type {kind!r}")
+
+    def _on_map_update(self, header, cells):
+        """
+        Accumulate the server's cells and publish them for the costmap.
+
+        **Not** into ``/map``: slam_toolbox owns that and builds it from its
+        scan graph, and cells injected from a monocular reconstruction would
+        stop it being a scan product without slam_toolbox ever knowing. They go
+        to a grid of their own, which a nav2 costmap layer reads alongside the
+        map. Nothing here touches SLAM's grid or its pose.
+
+        This is a second, finer-grained route to the costmap than
+        `mecanumbot_map_agreement`'s keepout mask, and the two are meant to
+        differ: the mask is built from the verdict's *regions* and a height
+        decision, this is the cells the comparison actually disagreed on. They
+        are published on separate topics for that reason -- enable whichever
+        the run wants, or both, in the nav2 parameters.
+        """
+        if self.obstacles is None:
+            return
+        if bridge.is_stale(header, self._current_map_id()):
+            self.get_logger().info(
+                f"dropping a map_update for map_id {header.get('map_id')!r}; "
+                f"the robot is on {self._current_map_id()!r}")
+            return
+
+        current = self._current_map_id()
+        if current and self.obstacles.map_id != current:
+            # SLAM started over: these coordinates named places in a map that
+            # no longer exists.
+            self.obstacles.reset(current)
+
+        try:
+            added = self.obstacles.add(header, cells)
+        except ValueError as exc:
+            self.get_logger().error(f"unusable map_update patch: {exc}")
+            return
+
+        geometry = getattr(self.map_source, "geometry", None)
+        if geometry is None:
+            # No /map yet. The cells are kept -- they are in metres and do not
+            # need one -- and go out with the next patch that arrives after it.
+            return
+
+        resolution, origin_x, origin_y, width, height, frame = geometry
+        grid = self.obstacles.render(resolution, origin_x, origin_y, width, height)
+        msg = OccupancyGrid()
+        msg.header = Header(stamp=self.get_clock().now().to_msg(), frame_id=frame)
+        msg.info.resolution = float(resolution)
+        msg.info.width = int(width)
+        msg.info.height = int(height)
+        msg.info.origin.position.x = float(origin_x)
+        msg.info.origin.position.y = float(origin_y)
+        msg.info.origin.orientation.w = 1.0
+        msg.data = grid.reshape(-1).tolist()
+        self.obstacle_pub.publish(msg)
+
+        self._obstacle_updates += 1
+        if added and self._obstacle_updates % 10 == 1:
+            self.get_logger().info(
+                f"the cloud says {len(self.obstacles)} cells are occupied that "
+                f"the scanner did not see (+{added} this patch), on "
+                f"{self.obstacle_pub.topic_name}")
+        if self.obstacles.capped and not self._warned_obstacle_cap:
+            self._warned_obstacle_cap = True
+            self.get_logger().warn(
+                f"stopped accumulating cloud obstacles at {len(self.obstacles)} "
+                "cells; that is far more than a room, so check the placement "
+                "(agreement, and the cloud's height in RViz) before trusting them")
 
     def _on_agreement(self, header):
         """
@@ -859,21 +950,28 @@ class Deep3RClientNode(Node):
                 return rclpy.time.Time(nanoseconds=best[1]).to_msg(), best[2]
         return self.get_clock().now().to_msg(), None
 
-    def _to_msg(self, points, colors, stamp):
-        fields = [
-            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
-        ]
+    def _to_msg(self, points, colors, cloud, stamp):
+        """
+        Build the ``PointCloud2``, with the layout the server declared.
+
+        Not a layout of this node's own: the server ships a ``pc2`` block for
+        exactly this, and a second copy here is the duplicated constant its
+        comment warns about.  See ``cloud.layout``, including the one field it
+        overrides.
+        """
+        declared, point_step = cloud_codec.layout(cloud, colors is not None)
         packed = cloud_codec.to_xyzrgb(points, colors)
         msg = PointCloud2()
         msg.header = Header(stamp=stamp, frame_id=self.frame_id)
         msg.height = 1
         msg.width = int(points.shape[0])
-        msg.fields = fields
+        msg.fields = [
+            PointField(name=f["name"], offset=f["offset"],
+                       datatype=f["datatype"], count=f["count"])
+            for f in declared
+        ]
         msg.is_bigendian = False
-        msg.point_step = 16
+        msg.point_step = point_step
         msg.row_step = msg.point_step * msg.width
         msg.is_dense = True
         msg.data = packed.tobytes()
