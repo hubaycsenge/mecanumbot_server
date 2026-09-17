@@ -177,6 +177,10 @@ class Deep3RClientNode(Node):
                 # map_frame, per frame -- see world_frame.py.
                 ("frame_id", "deep3r_world"),
                 ("publish_world_tf", True),
+                # A cloud whose transform was not sent has nowhere correct to
+                # be drawn; showing it against the previous one is worse than
+                # showing nothing, because it looks like a measurement.
+                ("skip_unplaced_clouds", True),
                 ("advertised_width", 1280),
                 ("advertised_height", 720),
                 ("advertised_fps", 15.0),
@@ -279,6 +283,9 @@ class Deep3RClientNode(Node):
         self.obstacle_pub = None
         self._obstacle_updates = 0
         self._warned_obstacle_cap = False
+        self._unplaced_clouds = 0
+        self._warned_unplaced = False
+        self.skip_unplaced_clouds = bool(gp("skip_unplaced_clouds").value)
         self.pose_pub = (
             self.create_publisher(PoseStamped, str(gp("pose_topic").value), 10)
             if self.publish_pose else None
@@ -549,8 +556,28 @@ class Deep3RClientNode(Node):
         pose = data.get("pose_c2w")
         # Before the cloud, so a listener already holds the transform at the
         # cloud's stamp when the cloud reaches it.
+        placed = True
         if self.world_tf is not None:
-            self._broadcast_world(result, frame_pose, pose, stamp)
+            placed = self._broadcast_world(result, frame_pose, pose, stamp)
+
+        if not placed and self.skip_unplaced_clouds:
+            # The cloud is published in `frame_id`, and `frame_id` is only
+            # where this cloud came from when the transform above was sent for
+            # it. Publishing anyway drew it against whatever the last
+            # successful frame set -- a different robot pose, a different neck
+            # angle -- which is how a cloud ends up looking confidently wrong
+            # rather than absent. A colleague reconstructed two metres below
+            # the floor is what that looks like from RViz.
+            self._unplaced_clouds += 1
+            if not self._warned_unplaced:
+                self._warned_unplaced = True
+                self.get_logger().warn(
+                    f"not publishing clouds the server did not place with this "
+                    f"node's own frame pose (pose_source "
+                    f"{result.get('pose_source')!r}); they would be drawn "
+                    f"against a stale {self.world_parent} -> {self.frame_id}. "
+                    "Set skip_unplaced_clouds:=false to see them anyway.")
+            return
 
         if points.shape[0]:
             self.cloud_pub.publish(
@@ -575,6 +602,11 @@ class Deep3RClientNode(Node):
             # walls happen to line up in RViz.
             compared = data.get("compare") or {}
             colour = data.get("colour") or {}
+            # The neck is the input the placement is most sensitive to and the
+            # only one nothing ever showed: the model turns ticks into a pitch,
+            # and a pitch wrong by 40 degrees puts a standing person entirely
+            # under the floor while the walls still roughly line up.
+            neck = (frame_pose or {}).get("camera") or {}
             poser = getattr(self, "frame_poser", None)
             self.get_logger().info(
                 f"cloud map {cloud_map_id} frame {data.get('frames_in_state')}: "
@@ -582,6 +614,11 @@ class Deep3RClientNode(Node):
                 f"in {self._frames_in} dropped {self.source.dropped}"
                 + (f", lidar/cloud ratio {check['ratio']}" if check.get("ratio")
                    else "")
+                + (f", neck {neck['neck_ticks']} ticks -> pitch "
+                   f"{neck['pitch_deg']:+.1f} deg" if neck.get("neck_ticks") is not None
+                   else ", no neck reading")
+                + (f", cloud floor at z {compared['floor_z']:+.2f} m "
+                   "(0 is right)" if compared.get("floor_z") is not None else "")
                 + (f", source frame {colour.get('brightness')}/255 bright, "
                    f"chroma {colour.get('chroma')}"
                    + (" -- NEARLY BLACK, so the points are too"
@@ -612,6 +649,9 @@ class Deep3RClientNode(Node):
         (``pose_source`` is ``frame``): a transform built from anything else
         would put the cloud somewhere the comparison did not.  Skipped frames
         leave TF to interpolate between the neighbouring estimates.
+
+        Returns whether a transform went out, because the caller must not
+        publish a cloud for which one did not.
         """
         matrix = None
         if result.get("pose_source") == "frame" and pose_c2w:
@@ -621,7 +661,7 @@ class Deep3RClientNode(Node):
                 self.get_logger().warn(f"cannot place {self.frame_id}: {exc}")
         if matrix is None:
             self._world_skipped += 1
-            return
+            return False
 
         if self._world_reference is None:
             self._world_reference = matrix
@@ -641,6 +681,7 @@ class Deep3RClientNode(Node):
         tf.transform.rotation.w = qw
         self.world_tf.sendTransform(tf)
         self._world_tfs_out += 1
+        return True
 
     # -- the map loop --------------------------------------------------------
 
