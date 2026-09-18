@@ -93,12 +93,18 @@ mecanumbot_deep3r_client_node:
     neck_topic: opencr_state
     neck_stale_s: 0.5
     camera:
-      # base_link, metres. Pivot and lever are the URDF's translations; at
-      # level they give the 0.13 / 0.21 perception uses for the same camera.
+      # base_link, metres. Pivot and lever are the URDF's translations.
+      # MEASURED 2026-09-18, tape from the floor with the neck at 550 ticks
+      # (-9.8 deg): horn screw 0.180 m up, lens 0.230 m up. base_link is 0.01 m
+      # above base_footprint, so pivot_z = 0.170 and the lever that reaches the
+      # lens is 0.0545. lever_z was 0.038, which put every cloud 21 mm into the
+      # floor on top of the tilt error below. lever_x is NOT measured -- the
+      # tape only settled the height -- so the lens may still be a centimetre
+      # short in range; it is a constant offset, not a range-dependent one.
       pivot_x: 0.1063
-      pivot_z: 0.1679
+      pivot_z: 0.170
       lever_x: 0.022
-      lever_z: 0.038
+      lever_z: 0.0545
       # The trees' neck_level_pos (6.0 board units) in servo ticks.
       level_ticks: 600.0
       # The constant mecanumbot_sensorproc_node uses for the same servo.

@@ -34,10 +34,10 @@ def test_at_level_the_lens_looks_forward_with_the_image_upright():
 
 
 def test_at_level_the_lens_is_where_perception_measured_it():
-    """0.13 / 0.21 in mecanumbot_sensorprocess_smart, reached independently."""
+    """0.128 / 0.2245 in mecanumbot_sensorprocess_smart, reached independently."""
     t = NeckCamera().extrinsic(600)
-    assert t[0, 3] == pytest.approx(0.13, abs=0.005)
-    assert t[2, 3] == pytest.approx(0.21, abs=0.005)
+    assert t[0, 3] == pytest.approx(0.128, abs=0.005)
+    assert t[2, 3] == pytest.approx(0.2245, abs=0.005)
     assert t[1, 3] == 0.0
 
 

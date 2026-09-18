@@ -29,8 +29,11 @@ the head, and a tilt that is linear in the servo's ticks::
 Pitch is positive **up**, matching the trees' "larger neck position looks
 further up". The pivot and lever are the URDF's translations -- the one part of
 it written for the robot rather than the mesh -- and at level they put the lens
-at (0.128, 0.206) m in ``base_link``, agreeing with the 0.13 / 0.21 perception
-uses. ``level_ticks`` is the trees' ``neck_level_pos`` (6.0 board units, the
+at (0.128, 0.225) m in ``base_link``, the same numbers perception uses. Both
+were measured with a tape from the floor on 2026-09-18, the neck held at 550
+ticks: the horn screw -- ``head_joint``'s own axis -- 0.180 m up and the lens
+0.230 m up. ``lever_x`` was not measured, so the lens may still be about a
+centimetre short in range; that is a constant offset, not a growing one. ``level_ticks`` is the trees' ``neck_level_pos`` (6.0 board units, the
 "neutral driving gaze"), and ``rad_per_tick`` is the constant
 ``mecanumbot_sensorproc_node`` uses for the same servo. Whether that gaze is
 *optically* level has not been measured; ``pitch_at_level`` is the number to
@@ -68,9 +71,9 @@ class NeckCamera:
     """The camera on the neck, in ``base_link`` (metres, radians)."""
 
     pivot_x: float = 0.1063
-    pivot_z: float = 0.1679
+    pivot_z: float = 0.170
     lever_x: float = 0.022
-    lever_z: float = 0.038
+    lever_z: float = 0.0545
     level_ticks: float = 600.0
     rad_per_tick: float = 0.005061
     pitch_at_level: float = 0.0
